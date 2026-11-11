@@ -11,7 +11,7 @@
   },
   "xfwm4": {
     "/general/theme": "AyuComfort",
-    "/general/title_font": "Inter SemiBold 10",
+    "/general/title_font": "Inter SemiBold 11",
     "/general/title_alignment": "left",
     "/general/workspace_count": 4,
     "/general/workspace_names": [

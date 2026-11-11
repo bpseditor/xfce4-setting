@@ -79,6 +79,7 @@ def main():
    existing=json.loads(widget.read_text())
    if isinstance(existing,dict): defaults.update(existing)
   except (ValueError,OSError): pass
+ defaults.pop('ping_target',None)
  if defaults.get('accent')=='#7dcfff': defaults['accent']='#bfbdb6'
  text(widget,json.dumps(defaults,indent=2))
  props['xfce4-panel']['/plugins/plugin-20/update-period']=max(2,min(30,int(defaults.get('panel_interval',5))))*1000

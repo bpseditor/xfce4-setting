@@ -16,3 +16,35 @@ def recolor_theme(root):
   # The upstream name remains only in licensing/source references.
   if path.name=='index.theme': text=text.replace('TokyoNight','AyuComfort')
   path.write_text(text)
+
+ # Distinct, taller title bars keep window names separate from application text.
+ style_window_frames(root/'xfwm4')
+
+def style_window_frames(root):
+ for path in root.glob('*.xpm'):
+  text=path.read_text()
+  inactive='inactive' in path.name
+  surface='#202630' if inactive else '#303944'
+  edge='#38414c' if inactive else '#596573'
+  text=text.replace('#151920',surface).replace('#0d1016',surface).replace('#292f38',surface)
+  lines=re.findall(r'"([^"\n]*)"',text)
+  if not lines: continue
+  w,h,n,cpp=map(int,lines[0].split())
+  pixels=lines[1+n:]
+  if h==24:
+   # Equal padding above and below preserves button glyph geometry.
+   pixels=pixels[:3]+[pixels[3]]*4+pixels[3:-3]+[pixels[-3]]*4+pixels[-3:]
+   h=32
+  palette=[line for line in lines[1:1+n] if not line.startswith('z c ')]
+  if h==32 and cpp==1:
+   palette.append('z c '+edge)
+   transparent={line[0] for line in palette if 'None' in line}
+   pixels[-1]=''.join(ch if ch in transparent else 'z' for ch in pixels[-1])
+  output=[f'{w} {h} {len(palette)} {cpp}']+palette+pixels
+  path.write_text('/* XPM */\nstatic char * frame[] = {\n'+',\n'.join('"'+line+'"' for line in output)+'};\n')
+ path=root/'themerc'
+ text=path.read_text()
+ text=re.sub(r'^active_text_color=.*$', 'active_text_color=#e0d6c5',text,flags=re.M)
+ text=re.sub(r'^inactive_text_color=.*$', 'inactive_text_color=#a6a9ab',text,flags=re.M)
+ text=re.sub(r'^title_vertical_offset_(active|inactive)=.*$',r'title_vertical_offset_\1=0',text,flags=re.M)
+ path.write_text(text)

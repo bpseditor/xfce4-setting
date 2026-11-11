@@ -11,7 +11,7 @@ if RUNTIME.stat().st_uid != os.getuid():
 CACHE = RUNTIME / (f'dashboard-{os.getpid()}.json' if '--window' in sys.argv else 'panel.json')
 
 CONFIG = Path.home()/'.config/system-power-widget/settings.json'
-DEFAULTS = dict(interval=5, panel_interval=5, warning_temperature=80, warning_memory=90, warning_battery=20, warning_color="#df8585", compact=False, metric_order="power,cpu,memory,temperature,network,runtime,swap,disk", show_cpu=True, show_memory=True, show_temperature=True, show_network=False, show_power=True, show_runtime=False, show_swap=False, show_disk=False, interface="auto", network_units="KiB/s", memory_units="percent", disk_path="/", average_samples=24, separator="  ·  ", accent="#d9ad72", tooltip=True, ping_target="1.1.1.1")
+DEFAULTS = dict(interval=5, panel_interval=5, warning_temperature=80, warning_memory=90, warning_battery=20, warning_color="#df8585", compact=False, metric_order="power,cpu,memory,temperature,network,runtime,swap,disk", show_cpu=True, show_memory=True, show_temperature=True, show_network=False, show_power=True, show_runtime=False, show_swap=False, show_disk=False, interface="auto", network_units="KiB/s", memory_units="percent", disk_path="/", average_samples=24, separator="  ·  ", accent="#d9ad72", tooltip=True)
 def settings():
     try: stored=json.loads(CONFIG.read_text())
     except (OSError,ValueError): stored={}
@@ -239,7 +239,7 @@ def window():
         choice('memory_units','Panel memory format',['percent','GiB'])
         choice('separator','Panel separator',['  ·  ','  |  ','    '])
         entries={}
-        for key,caption in [('disk_path','Disk mount or directory'),('ping_target','Connectivity test IP / hostname'),('metric_order','Order: power,cpu,memory,temperature,network,runtime,swap,disk')]:
+        for key,caption in [('disk_path','Disk mount or directory'),('metric_order','Order: power,cpu,memory,temperature,network,runtime,swap,disk')]:
             row=Gtk.Box(spacing=16);row.pack_start(Gtk.Label(label=caption,xalign=0),True,True,0)
             lab=row.get_children()[0];lab.set_line_wrap(True);lab.set_max_width_chars(40)
             entry=Gtk.Entry();entry.set_text(cfg[key]);row.pack_end(entry,False,False,0)
@@ -317,25 +317,6 @@ def window():
             status.set_text('Presentation mode updated.' if not r.returncode else r.stderr)
         presentation.get_child().set_line_wrap(True)
         presentation.connect('toggled',set_presentation);settings_box.pack_start(presentation,False,False,0)
-        test=Gtk.Button(label='Test connectivity on selected interface')
-        def probe(button):
-            import re,threading
-            target=entries['ping_target'].get_text().strip();interface=choices['interface'].get_active_id()
-            if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9.:-]{0,252}',target):
-                status.set_text('Enter an IP address or hostname.');return
-            button.set_sensitive(False);status.set_text('Testing connectivity…')
-            def worker():
-                cmd=['ping','-n','-c','2','-W','2']
-                if interface!='auto':cmd+=['-I',interface]
-                cmd+=[target]
-                try:
-                    result=subprocess.run(cmd,capture_output=True,text=True,timeout=8)
-                    message=('Reachable' if result.returncode==0 else 'No ICMP reply (this does not necessarily mean no internet)')+' · '+interface+' · '+target
-                except (OSError,subprocess.TimeoutExpired) as exc:message=str(exc)
-                def done():status.set_text(message);button.set_sensitive(True);return False
-                GLib.idle_add(done)
-            threading.Thread(target=worker,daemon=True).start()
-        test.connect('clicked',probe);settings_box.pack_start(test,False,False,0)
         outer.pack_start(status,False,False,0)
         bar=Gtk.Box(spacing=8)
         for caption,command in [('Task Manager',['xfce4-taskmanager']),('Power Settings',['xfce4-power-manager','-c']),('XFCE Settings',['xfce4-settings-manager'])]:

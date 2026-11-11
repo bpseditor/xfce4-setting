@@ -70,6 +70,7 @@ def main():
     data=stage/(family+'-'+name);fetch(f'https://raw.githubusercontent.com/google/fonts/{FONT_COMMIT}/ofl/{family}/'+urllib.parse.quote(name),data);put(data,dest)
  for name in ['system-power-widget','eye-break-reminder']:put(ROOT/'bin'/name,HOME/'.local/bin'/name,True)
  put(ROOT/'config/gtk.css',HOME/'.config/gtk-3.0/gtk.css')
+ put(ROOT/'config/gtk4.css',HOME/'.config/gtk-4.0/gtk.css')
  put(ROOT/'config/fonts.conf',HOME/'.config/fontconfig/conf.d/60-local-fonts.conf')
  put(ROOT/'config/wallpaper.svg',HOME/'.local/share/backgrounds/ayu-comfort-horizon.svg')
  widget=HOME/'.config/system-power-widget/settings.json'

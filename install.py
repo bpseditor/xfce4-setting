@@ -117,4 +117,3 @@ def main():
  print(f'Installed. Desktop rollback: python3 "{backup}/restore.py"')
  print('Log out and back in to apply the private umask and start the session reminder.')
 if __name__=='__main__':main()
-

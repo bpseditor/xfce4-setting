@@ -24,4 +24,3 @@ try:
 finally:
  subprocess.Popen(['xfce4-panel'],start_new_session=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
 print('Desktop restored. Power settings have a separate root-owned recovery script.')
-

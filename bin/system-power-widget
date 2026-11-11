@@ -271,4 +271,3 @@ def window():
 if __name__=='__main__':
     if '--window' in sys.argv: window()
     else: panel()
-

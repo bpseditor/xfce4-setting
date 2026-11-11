@@ -150,7 +150,9 @@
     "/commands/custom/<Primary><Alt>f": "thunar",
     "/commands/custom/<Primary><Alt>l": "xflock4",
     "/commands/custom/<Primary><Shift>Escape": "xfce4-taskmanager",
-    "/commands/custom/Super_L": "xfce4-popup-whiskermenu"
+    "/commands/custom/Super_L": "xfce4-popup-whiskermenu",
+    "/xfwm4/custom/override": true,
+    "/commands/custom/override": true
   },
   "xfce4-terminal": {
     "/font-name": "JetBrains Mono 11",

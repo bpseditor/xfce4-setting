@@ -78,4 +78,3 @@ with (runtime / "eye-break-reminder.lock").open("a") as lock:
             logger.exception("Could not deliver reminder.")
         deadline = time.monotonic() + 1200
     logger.info("XFCE session ended; exiting.")
-

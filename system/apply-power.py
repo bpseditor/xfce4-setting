@@ -39,4 +39,3 @@ rollback.write_text('#!/bin/sh\nset -eu\nsv -w 20 down /var/service/charge-guard
  ('sv up /var/service/charge-guard\n' if enabled else 'rm /var/service/charge-guard\n') )
 rollback.chmod(0o700)
 print(f'Power backup and recovery: {rollback}')
-

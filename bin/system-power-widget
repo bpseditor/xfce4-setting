@@ -1,0 +1,274 @@
+#!/usr/bin/python3
+"""Low-overhead XFCE genmon monitor; all measurements are read-only."""
+import os, sys, json, time, html, shutil, statistics
+from pathlib import Path
+os.umask(0o077)
+BAT = Path('/sys/class/power_supply/BAT0')
+RUNTIME = Path(os.environ.get('XDG_RUNTIME_DIR', '/tmp')) / ('system-power-' + str(os.getuid()))
+RUNTIME.mkdir(mode=0o700, exist_ok=True)
+if RUNTIME.stat().st_uid != os.getuid():
+    raise RuntimeError('Unsafe runtime directory')
+CACHE = RUNTIME / (f'dashboard-{os.getpid()}.json' if '--window' in sys.argv else 'panel.json')
+
+CONFIG = Path.home()/'.config/system-power-widget/settings.json'
+DEFAULTS = dict(interval=5, show_cpu=True, show_memory=True, show_temperature=True, show_network=False)
+def settings():
+    try: stored=json.loads(CONFIG.read_text())
+    except (OSError,ValueError): stored={}
+    cfg=DEFAULTS.copy()
+    for key,val in stored.items():
+        if key in cfg and type(val) is type(cfg[key]): cfg[key]=val
+    cfg['interval']=max(2,min(30,cfg['interval']))
+    return cfg
+
+def read(p, default='—'):
+    try: return Path(p).read_text().strip()
+    except (OSError, ValueError): return default
+
+def num(p, scale=1):
+    try: return float(read(p)) / scale
+    except ValueError: return None
+
+def fmt(n, unit='', digits=1):
+    return '—' if n is None else f'{n:.{digits}f}{unit}'
+
+def duration(hours):
+    if hours is None or hours < 0: return '—'
+    return f'{int(hours * 60) // 60} h {int(hours * 60) % 60:02d} min'
+
+def sample():
+    now = time.monotonic()
+    try: prev = json.loads(CACHE.read_text())
+    except (OSError, ValueError): prev = {}
+    elapsed = now - prev.get('t', now)
+    valid = 0.2 < elapsed < 120
+    cpu = [int(x) for x in read('/proc/stat').splitlines()[0].split()[1:9]]
+    total, idle = sum(cpu), cpu[3]+cpu[4]
+    delta = total - prev.get('cpu', total)
+    busy = max(0, min(100, 100*(1-(idle-prev.get('idle',idle))/delta))) if valid and delta > 0 else None
+    mem = {}
+    for line in read('/proc/meminfo').splitlines():
+        k,v = line.split(':',1); mem[k] = int(v.strip().split()[0])
+    used = (mem['MemTotal']-mem['MemAvailable'])/1048576
+    mt = mem['MemTotal']/1048576
+    swap = (mem['SwapTotal']-mem['SwapFree'])/1048576
+    net, netrows = {}, []
+    for p in sorted(Path('/sys/class/net').iterdir()):
+        if p.name == 'lo': continue
+        rx,tx = num(p/'statistics/rx_bytes'),num(p/'statistics/tx_bytes')
+        if rx is None or tx is None: continue
+        net[p.name] = [rx,tx]
+        if read(p/'operstate') not in ('up','unknown'): continue
+        old = prev.get('net',{}).get(p.name)
+        speed = ''
+        if valid and old:
+            speed=f' ↓ {max(0,rx-old[0])/elapsed/1024:.0f} ↑ {max(0,tx-old[1])/elapsed/1024:.0f} KiB/s'
+        netrows.append(p.name+speed)
+    status = read(BAT/'status')
+    ac = any(read(p/'online') == '1' for p in Path('/sys/class/power_supply').iterdir() if read(p/'type') != 'Battery')
+    power,energy,full,design = [num(BAT/f,1e6) for f in ['power_now','energy_now','energy_full','energy_full_design']]
+    percent = num(BAT/'capacity')
+    start,end = num(BAT/'charge_control_start_threshold'),num(BAT/'charge_control_end_threshold')
+    history = prev.get('power',[]) if valid and prev.get('status') == status and prev.get('ac') == ac else []
+    if power is not None: history = (history + [[now,power]])[-24:]
+    smooth = statistics.mean(x[1] for x in history) if history else None
+    eta = energy/smooth if status == 'Discharging' and energy is not None and smooth and smooth > 0.5 else None
+    temps,fan = [],[]
+    for hw in sorted(Path('/sys/class/hwmon').glob('hwmon*')):
+        name = read(hw/'name')
+        for p in sorted(hw.glob('temp*_input')):
+            val=num(p,1000)
+            if val is not None and 0 < val < 120:
+                label=read(p.with_name(p.name.replace('_input','_label')),name)
+                friendly={'k10temp':'CPU','amdgpu':'GPU','nvme':'SSD','iwlwifi_1':'Wi-Fi','thinkpad':'CPU (EC)'}.get(name,label)
+                if name != 'thinkpad': temps.append(f'{friendly}: {val:.0f} °C')
+        for p in hw.glob('fan*_input'):
+            v=num(p)
+            if v is not None: fan.append(f'{v:.0f} RPM')
+    freqs=[num(p,1000) for p in Path('/sys/devices/system/cpu').glob('cpu[0-9]*/cpufreq/scaling_cur_freq')]
+    freqs=[v for v in freqs if v is not None]
+    disk=shutil.disk_usage('/')
+    bright=[]
+    for p in Path('/sys/class/backlight').iterdir():
+        v,m=num(p/'brightness'),num(p/'max_brightness')
+        if v is not None and m: bright.append(f'{v/m*100:.0f}%')
+    uptime=float(read('/proc/uptime','0 0').split()[0])
+    state={'Charging':'charging','Discharging':'discharging','Not charging':'AC power','Full':'fully charged'}.get(status,status)
+    if status=='Charging':
+        flow=f'Into battery: {fmt(power," W")} (average {fmt(smooth," W")})'
+        label=f'AC {fmt(percent,"%",0)}  +{fmt(power,"W")}'
+    elif status=='Discharging':
+        flow=f'From battery: {fmt(power," W")} (average {fmt(smooth," W")})'
+        label=f'BAT {fmt(percent,"%",0)}  −{fmt(power,"W")}'
+    else:
+        flow=f'Battery flow: {fmt(power," W")}'
+        label=f'{"AC" if ac else "BAT"} {fmt(percent,"%",0)}'
+    rows=[
+      ('Power source',f'{"Adapter connected" if ac else "Running on battery"} · {state}'),
+      ('Power flow',flow),
+      ('Estimated runtime', duration(eta) if eta is not None else '— (available while discharging)'),
+      ('Stored energy',f'{fmt(energy," Wh")} / {fmt(full," Wh")}'),
+      ('Charge thresholds',f'Start {fmt(start,"%",0)} · stop {fmt(end,"%",0)}'),
+      ('Battery',f'{read(BAT/"manufacturer")} {read(BAT/"model_name")} · {read(BAT/"cycle_count")} cycles'),
+      ('Reported capacity',f'{fmt(full/design*100 if full and design else None,"%")} of design {fmt(design," Wh")}'),
+      ('Voltage',fmt(num(BAT/'voltage_now',1e6),' V')),
+      ('CPU',f'{fmt(busy,"%",0)} · frequency {fmt(statistics.mean(freqs) if freqs else None," MHz",0)}'),
+      ('Load 1 / 5 / 15 min',' / '.join(f'{v:.2f}' for v in os.getloadavg())),
+      ('Temperatures',' · '.join(temps) or '—'),
+      ('Fan',' · '.join(dict.fromkeys(fan)) or '—'),
+      ('Memory',f'{used:.1f} / {mt:.1f} GiB ({used/mt*100:.0f}%)'),
+      ('Swap',f'{swap:.1f} / {mem["SwapTotal"]/1048576:.1f} GiB'),
+      ('Disk /',f'Free {disk.free/2**30:.1f} GiB · used {disk.used/disk.total*100:.0f}%'),
+      ('Network','\n'.join(netrows) or 'No active interfaces'),
+      ('Brightness',' · '.join(bright) or '—'),
+      ('Uptime',duration(uptime/3600)),
+      ('CPU governor',read('/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor')),
+      ('CPU limit',fmt(num('/sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq',1000),' MHz',0)),
+      ('GPU',read('/sys/class/drm/card0/device/power_dpm_force_performance_level')),
+    ]
+    note='On AC, watts measure battery charging, not wall power.\nRuntime depends on workload. Reported capacity is a controller estimate.\nThe start threshold rises temporarily for a top-up after connecting AC.'
+    data={'t':now,'cpu':total,'idle':idle,'net':net,'power':history,'status':status,'ac':ac}
+    tmp=CACHE.with_suffix('.tmp');tmp.write_text(json.dumps(data));tmp.replace(CACHE)
+    cfg = settings()
+    pieces = [label]
+    if cfg['show_cpu']: pieces.append(f'CPU {fmt(busy,"%",0)}')
+    if cfg['show_memory']: pieces.append(f'RAM {used/mt*100:.0f}%')
+    if cfg['show_temperature']:
+        cpu_temp = next((num(p,1000) for hw in Path('/sys/class/hwmon').glob('hwmon*') if read(hw/'name')=='k10temp' for p in hw.glob('temp*_input')), None)
+        pieces.append(fmt(cpu_temp,'°',0))
+    if cfg['show_network'] and netrows: pieces.append('NET '+next((x for x in netrows if x.startswith('wlp')),netrows[0]).split(' ',1)[-1])
+    return '  ·  '.join(pieces),rows,note
+
+def panel():
+    label,rows,note=sample()
+    tip='\n'.join(f'{k}: {v}' for k,v in rows)+'\n\n'+note+'\nClick to open System & Power.'
+    color='#e0af68' if read(BAT/'status') == 'Discharging' else '#7dcfff'
+    print(f'<txt><span foreground="{color}">{html.escape(label)}</span></txt>'
+          f'<txtclick>{html.escape(str(Path.home()/".local/bin/system-power-widget"))} --window</txtclick>'
+          f'<tool>{html.escape(tip)}</tool>')
+
+
+def window():
+    import gi, subprocess
+    gi.require_version('Gtk','3.0')
+    from gi.repository import Gtk,GLib,Gio,Gdk
+    app=Gtk.Application(application_id='local.user.SystemPowerWidget', flags=Gio.ApplicationFlags.FLAGS_NONE)
+    def activate(app):
+        if app.get_active_window():
+            app.get_active_window().present();return
+        cfg=settings()
+        win=Gtk.ApplicationWindow(application=app,title='System & Power')
+        win.set_default_size(760,650)
+        win.set_icon_name('utilities-system-monitor')
+        outer=Gtk.Box(orientation=Gtk.Orientation.VERTICAL,spacing=16,margin=22)
+        win.add(outer)
+        title=Gtk.Label(xalign=0)
+        title.set_markup('<span size="x-large" weight="bold">System &amp; Power</span>')
+        outer.pack_start(title,False,False,0)
+        subtitle=Gtk.Label(label='THINKPAD  /  LIVE TELEMETRY',xalign=0)
+        subtitle.get_style_context().add_class('dim-label');outer.pack_start(subtitle,False,False,0)
+        summary=Gtk.Label(xalign=0)
+        summary.set_line_wrap(True);summary.set_max_width_chars(85)
+        summary.set_margin_top(6);summary.set_margin_bottom(6)
+        outer.pack_start(summary,False,False,0)
+        notebook=Gtk.Notebook();outer.pack_start(notebook,True,True,0)
+        _,rows,note=sample()
+        labels={}
+        groups=[('Power',range(0,8)),('System',list(range(8,15))+list(range(16,21))),('Network',[15])]
+        for name,indices in groups:
+            scroll=Gtk.ScrolledWindow();scroll.set_policy(Gtk.PolicyType.NEVER,Gtk.PolicyType.AUTOMATIC)
+            grid=Gtk.Grid(column_spacing=26,row_spacing=14,margin=18)
+            scroll.add(grid);notebook.append_page(scroll,Gtk.Label(label=name))
+            for i,index in enumerate(indices):
+                k,v=rows[index]
+                key=Gtk.Label(label=k,xalign=0);key.set_valign(Gtk.Align.START);key.get_style_context().add_class('dim-label')
+                val=Gtk.Label(label=v,xalign=0);val.set_line_wrap(True);val.set_max_width_chars(55);val.set_hexpand(True)
+                grid.attach(key,0,i,1,1);grid.attach(val,1,i,1,1);labels[index]=val
+            if name=='Power':
+                info=Gtk.Label(label=note,xalign=0);info.set_line_wrap(True);info.set_max_width_chars(82)
+                info.get_style_context().add_class('dim-label');info.set_margin_top(12);grid.attach(info,0,9,2,1)
+                policy=Gtk.Label(label='Charge care: 80% cap · top up on reconnect · no forced discharge',xalign=0)
+                policy.set_line_wrap(True);grid.attach(policy,0,10,2,1)
+            if name=='Network':
+                info=Gtk.Label(label='Rates are per interface. VPN and physical traffic overlap;\nthey are intentionally not added together.',xalign=0)
+                info.get_style_context().add_class('dim-label');grid.attach(info,0,2,2,1)
+        settings_box=Gtk.Box(orientation=Gtk.Orientation.VERTICAL,spacing=14,margin=18)
+        sc=Gtk.ScrolledWindow();sc.add(settings_box);notebook.append_page(sc,Gtk.Label(label='Settings'))
+        controls={}
+        for key,caption in [('show_cpu','CPU usage in panel'),('show_memory','Memory usage in panel'),('show_temperature','CPU temperature in panel'),('show_network','Network speed in panel')]:
+            row=Gtk.Box(spacing=16);lab=Gtk.Label(label=caption,xalign=0);row.pack_start(lab,True,True,0)
+            sw=Gtk.Switch();sw.set_active(cfg[key]);row.pack_end(sw,False,False,0);controls[key]=sw
+            settings_box.pack_start(row,False,False,0)
+        row=Gtk.Box(spacing=16);row.pack_start(Gtk.Label(label='Dashboard refresh interval (seconds)',xalign=0),True,True,0)
+        spin=Gtk.SpinButton.new_with_range(2,30,1);spin.set_value(cfg['interval']);row.pack_end(spin,False,False,0)
+        settings_box.pack_start(row,False,False,0)
+        status=Gtk.Label(xalign=0);status.set_line_wrap(True)
+        timer=[None]
+        def update():
+            label,data,_=sample()
+            summary.set_markup('<span foreground="#7dcfff" weight="bold">'+html.escape(label)+'</span>')
+            for i,lab in labels.items(): lab.set_text(data[i][1])
+            return True
+        def save(button):
+            cfg.update({k:sw.get_active() for k,sw in controls.items()})
+            cfg['interval']=spin.get_value_as_int()
+            CONFIG.parent.mkdir(parents=True,exist_ok=True)
+            tmp=CONFIG.with_suffix('.tmp');tmp.write_text(json.dumps(cfg,indent=2));tmp.replace(CONFIG)
+            if timer[0]: GLib.source_remove(timer[0])
+            timer[0]=GLib.timeout_add_seconds(cfg['interval'],update)
+            status.set_text('Preferences saved. Panel refreshes every 5 seconds.')
+            update()
+        save_button=Gtk.Button(label='Apply display preferences');save_button.connect('clicked',save)
+        settings_box.pack_start(save_button,False,False,0)
+        settings_box.pack_start(Gtk.Separator(),False,False,0)
+        # Brightness uses the active session's standard elogind API; no root helper.
+        backs=list(Path('/sys/class/backlight').iterdir())
+        if backs:
+            back=backs[0];maximum=num(back/'max_brightness');current=num(back/'brightness')
+            if maximum and current is not None:
+                settings_box.pack_start(Gtk.Label(label='Display brightness',xalign=0),False,False,0)
+                scale=Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL,5,100,1)
+                scale.set_value(current/maximum*100);scale.set_digits(0);scale.set_value_pos(Gtk.PositionType.RIGHT)
+                scale.connect('format-value',lambda widget,value:f'{value:.0f}%')
+                settings_box.pack_start(scale,False,False,0)
+                debounce=[None]
+                def apply_brightness():
+                    debounce[0]=None
+                    try:
+                        bus=Gio.bus_get_sync(Gio.BusType.SYSTEM,None)
+                        bus.call_sync('org.freedesktop.login1','/org/freedesktop/login1/session/self',
+                          'org.freedesktop.login1.Session','SetBrightness',
+                          GLib.Variant('(ssu)',('backlight',back.name,int(maximum*scale.get_value()/100))),
+                          None,Gio.DBusCallFlags.NONE,3000,None)
+                        status.set_text('Brightness updated.')
+                    except GLib.Error as exc: status.set_text('Brightness: '+exc.message)
+                    return False
+                def brightness_changed(s):
+                    if debounce[0]: GLib.source_remove(debounce[0])
+                    debounce[0]=GLib.timeout_add(250,apply_brightness)
+                scale.connect('value-changed',brightness_changed)
+        presentation=Gtk.CheckButton(label='Presentation mode (keep the screen awake)')
+        result=subprocess.run(['xfconf-query','-c','xfce4-power-manager','-p','/xfce4-power-manager/presentation-mode'],capture_output=True,text=True)
+        presentation.set_active(result.stdout.strip()=='true')
+        def set_presentation(w):
+            r=subprocess.run(['xfconf-query','-c','xfce4-power-manager','-p','/xfce4-power-manager/presentation-mode','-s',str(w.get_active()).lower()],capture_output=True,text=True)
+            status.set_text('Presentation mode updated.' if not r.returncode else r.stderr)
+        presentation.get_child().set_line_wrap(True)
+        presentation.connect('toggled',set_presentation);settings_box.pack_start(presentation,False,False,0)
+        settings_box.pack_start(status,False,False,0)
+        bar=Gtk.Box(spacing=8)
+        for caption,command in [('Task Manager',['xfce4-taskmanager']),('Power Settings',['xfce4-power-manager','-c']),('XFCE Settings',['xfce4-settings-manager'])]:
+            button=Gtk.Button(label=caption)
+            def launch(b,cmd=command):
+                try: Gio.Subprocess.new(cmd,Gio.SubprocessFlags.NONE)
+                except GLib.Error as exc: status.set_text(exc.message)
+            button.connect('clicked',launch);bar.pack_start(button,True,True,0)
+        outer.pack_start(bar,False,False,0)
+        update();timer[0]=GLib.timeout_add_seconds(cfg['interval'],update)
+        win.connect('destroy',lambda w:GLib.source_remove(timer[0]) if timer[0] else None)
+        win.show_all()
+    app.connect('activate',activate);app.run([])
+if __name__=='__main__':
+    if '--window' in sys.argv: window()
+    else: panel()
+

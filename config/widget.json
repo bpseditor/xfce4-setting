@@ -1,0 +1,7 @@
+{
+  "interval": 5,
+  "show_cpu": true,
+  "show_memory": true,
+  "show_temperature": true,
+  "show_network": true
+}

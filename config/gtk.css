@@ -1,0 +1,33 @@
+/* Local Tokyo Night panel styling */
+.xfce4-panel { background-color: #16161e; color: #c0caf5; border-bottom: 1px solid #292e42; }
+.xfce4-panel button { border: 0; border-radius: 7px; margin: 3px 2px; padding: 2px 6px; background-image: none; box-shadow: none; }
+.xfce4-panel button:hover { background-color: #292e42; }
+.xfce4-panel button:checked { background-color: #3b4261; color: #7dcfff; }
+#genmon-20 { padding: 0 10px; margin: 4px 5px; border-radius: 8px; background-color: #24283b; }
+#clock-button { color: #bb9af7; padding: 0 10px; }
+tooltip { background-color: #1a1b26; color: #c0caf5; border: 1px solid #414868; border-radius: 8px; }
+
+/* Keep inactive windows legible rather than fading all telemetry. */
+.background:backdrop { color: #c0caf5; }
+.background:backdrop label { color: #a9b1d6; }
+.dim-label, .dim-label:backdrop { color: #a9b1d6; opacity: 1; }
+notebook > header tab:checked label { color: #7dcfff; }
+
+/* Screenshot review: readable selected categories and usable controls. */
+window:not(.xfce4-panel) button:not(.flat) {
+ background-image: none; background-color: #24283b; color: #c0caf5;
+ border: 1px solid #3b4261; border-radius: 6px; padding: 4px 10px; min-height: 24px;
+}
+window:not(.xfce4-panel) button:not(.flat):hover { background-color: #343b58; border-color: #7aa2f7; }
+window:not(.xfce4-panel) button:not(.flat):checked { background-color: #3b4261; color: #c0caf5; }
+window:not(.xfce4-panel) button:not(.flat):disabled { color: #737aa2; }
+#whiskermenu-window button:checked, #whiskermenu-window button:checked label { color: #c0caf5; background-color: #292e42; }
+notebook > header tab { padding: 6px 12px; }
+notebook > header tab:checked { border-bottom: 2px solid #7dcfff; }
+infobar.info, infobar.info:backdrop { background-color: #24283b; color: #c0caf5; }
+infobar.info label, infobar.info:backdrop label { color: #c0caf5; }
+XfdesktopIconView { -XfdesktopIconView-cell-text-width-proportion: 2.8; -XfdesktopIconView-cell-spacing: 4; -XfdesktopIconView-cell-padding: 6; }
+
+#xfwm-tabwin { background-color: #1a1b26; color: #c0caf5; border: 1px solid #7aa2f7; border-radius: 10px; padding: 10px; }
+#xfwm-tabwin label, #xfwm-tabwin button label { color: #c0caf5; }
+#xfwm-tabwin button:checked, #xfwm-tabwin button:hover { background-color: #343b58; color: #c0caf5; }

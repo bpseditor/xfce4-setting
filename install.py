@@ -71,6 +71,29 @@ def main():
  for name in ['system-power-widget','eye-break-reminder']:put(ROOT/'bin'/name,HOME/'.local/bin'/name,True)
  put(ROOT/'config/gtk.css',HOME/'.config/gtk-3.0/gtk.css')
  put(ROOT/'config/gtk4.css',HOME/'.config/gtk-4.0/gtk.css')
+ # Qt5 and Qt6 use the same palette; qt6ct supports the qt5ct plugin alias.
+ import configparser,io
+ for version in (5,6):
+  base=HOME/f'.config/qt{version}ct'
+  scheme=base/'colors/AyuComfort.conf'
+  put(ROOT/'config/qt-colors.conf',scheme)
+  destination=base/f'qt{version}ct.conf'
+  qt=configparser.ConfigParser(interpolation=None);qt.optionxform=str
+  if destination.exists(): qt.read(destination)
+  template=configparser.ConfigParser(interpolation=None);template.optionxform=str
+  template.read_string((ROOT/'config/qtct.conf').read_text().replace('@SCHEME@',str(scheme)))
+  for section in template:
+   if section=='DEFAULT': continue
+   if section not in qt: qt.add_section(section)
+   qt[section].update(template[section])
+  output=io.StringIO();qt.write(output,space_around_delimiters=False);text(destination,output.getvalue())
+ profile=HOME/'.xprofile';value=profile.read_text() if profile.exists() else ''
+ marker='# xfce4-setting Qt palette'
+ if marker not in value: text(profile,value+'\n'+marker+'\nexport QT_QPA_PLATFORMTHEME=qt5ct\n')
+ os.environ['QT_QPA_PLATFORMTHEME']='qt5ct'
+ if shutil.which('dbus-update-activation-environment'):
+  run('dbus-update-activation-environment','QT_QPA_PLATFORMTHEME=qt5ct')
+
  put(ROOT/'config/fonts.conf',HOME/'.config/fontconfig/conf.d/60-local-fonts.conf')
  put(ROOT/'config/wallpaper.svg',HOME/'.local/share/backgrounds/ayu-comfort-horizon.svg')
  widget=HOME/'.config/system-power-widget/settings.json'

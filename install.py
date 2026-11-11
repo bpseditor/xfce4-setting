@@ -24,11 +24,13 @@ def main():
  from gi.repository import Xfconf
  Xfconf.init()
  def setprop(channel,path,value):
+  unsigned=channel=='xfce4-power-manager' and type(value) is int
+  if unsigned: subprocess.run(['xfconf-query','-c',channel,'-p',path,'-r'],capture_output=True)
   cmd=['xfconf-query','-c',channel,'-p',path,'--create']
   values=value if isinstance(value,list) else [value]
   if isinstance(value,list):cmd+=['--force-array']
   for v in values:
-   typ='bool' if isinstance(v,bool) else 'int' if isinstance(v,int) else 'double' if isinstance(v,float) else 'string'
+   typ='uint' if unsigned else 'bool' if isinstance(v,bool) else 'int' if isinstance(v,int) else 'double' if isinstance(v,float) else 'string'
    cmd+=['-t',typ,'-s',str(v).lower() if isinstance(v,bool) else str(v).replace('@HOME@',str(HOME))]
   run(*cmd)
  import datetime

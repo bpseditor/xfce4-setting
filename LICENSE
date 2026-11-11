@@ -21,3 +21,9 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 Third-party assets downloaded by the installer retain their upstream licenses.
+
+Theme base downloaded by the installer: Bukutsu/tokyonight-xfce
+https://github.com/Bukutsu/tokyonight-xfce
+Pinned revision: 4c0d7b21e201f6ed84c92207420f90648e3d2681
+Upstream license files are retained in the installed theme.
+Palette inspired by Zed Ayu Dark: https://github.com/zed-industries/zed/blob/main/assets/themes/ayu/ayu.json

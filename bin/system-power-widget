@@ -11,17 +11,21 @@ if RUNTIME.stat().st_uid != os.getuid():
 CACHE = RUNTIME / (f'dashboard-{os.getpid()}.json' if '--window' in sys.argv else 'panel.json')
 
 CONFIG = Path.home()/'.config/system-power-widget/settings.json'
-DEFAULTS = dict(interval=5, show_cpu=True, show_memory=True, show_temperature=True, show_network=False, show_power=True, show_runtime=False, show_swap=False, show_disk=False, interface="auto", network_units="KiB/s", memory_units="percent", disk_path="/", average_samples=24, separator="  ·  ", accent="#7dcfff", tooltip=True, ping_target="1.1.1.1")
+DEFAULTS = dict(interval=5, panel_interval=5, warning_temperature=80, warning_memory=90, warning_battery=20, warning_color="#df8585", compact=False, metric_order="power,cpu,memory,temperature,network,runtime,swap,disk", show_cpu=True, show_memory=True, show_temperature=True, show_network=False, show_power=True, show_runtime=False, show_swap=False, show_disk=False, interface="auto", network_units="KiB/s", memory_units="percent", disk_path="/", average_samples=24, separator="  ·  ", accent="#d9ad72", tooltip=True, ping_target="1.1.1.1")
 def settings():
     try: stored=json.loads(CONFIG.read_text())
     except (OSError,ValueError): stored={}
     cfg=DEFAULTS.copy()
+    if not isinstance(stored,dict): stored={}
     for key,val in stored.items():
         if key in cfg and type(val) is type(cfg[key]): cfg[key]=val
     cfg['interval']=max(2,min(30,cfg['interval']))
+    cfg['panel_interval']=max(2,min(30,cfg['panel_interval']))
+    for key,lo,hi in [('warning_temperature',40,110),('warning_memory',50,100),('warning_battery',5,50)]: cfg[key]=max(lo,min(hi,cfg[key]))
     cfg['average_samples']=max(1,min(120,cfg['average_samples']))
     import re
-    if not re.fullmatch(r'#[0-9a-fA-F]{6}',cfg['accent']): cfg['accent']=DEFAULTS['accent']
+    for key in ('accent','warning_color'):
+        if not re.fullmatch(r'#[0-9a-fA-F]{6}',cfg[key]): cfg[key]=DEFAULTS[key]
     return cfg
 
 def read(p, default='—'):
@@ -136,28 +140,29 @@ def sample():
     data={'t':now,'cpu':total,'idle':idle,'net':net,'power':history,'status':status,'ac':ac}
     tmp=CACHE.with_suffix('.tmp');tmp.write_text(json.dumps(data));tmp.replace(CACHE)
     cfg = settings()
-    pieces = [label] if cfg['show_power'] else []
-    if cfg['show_runtime']: pieces.append('ETA '+duration(eta))
-    if cfg['show_swap']: pieces.append(f'SWAP {swap:.1f}G')
-    if cfg['show_disk']: pieces.append(f'DISK {disk.used/disk.total*100:.0f}%')
-    if cfg['show_cpu']: pieces.append(f'CPU {fmt(busy,"%",0)}')
-    if cfg['show_memory']: pieces.append(f'RAM {used/mt*100:.0f}%' if cfg['memory_units']=='percent' else f'RAM {used:.1f}G')
-    if cfg['show_temperature']:
-        cpu_temp = next((num(p,1000) for hw in Path('/sys/class/hwmon').glob('hwmon*') if read(hw/'name')=='k10temp' for p in hw.glob('temp*_input')), None)
-        pieces.append(fmt(cpu_temp,'°',0))
+    cpu_temp = next((num(p,1000) for hw in Path('/sys/class/hwmon').glob('hwmon*') if read(hw/'name')=='k10temp' for p in hw.glob('temp*_input')), None)
+    metrics=dict(power=label, runtime='ETA '+duration(eta), swap=f'SWAP {swap:.1f}G', disk=f'DISK {disk.used/disk.total*100:.0f}%', cpu=f'CPU {fmt(busy,"%",0)}', memory=f'RAM {used/mt*100:.0f}%' if cfg['memory_units']=='percent' else f'RAM {used:.1f}G', temperature=fmt(cpu_temp,'°',0))
     selected=cfg['interface']
     if selected=='auto':
         routes=read('/proc/net/route','').splitlines()[1:]
         selected=next((line.split()[0] for line in routes if len(line.split())>1 and line.split()[1]=='00000000'), '')
     network=next((x for x in netrows if x.split()[0]==selected), (netrows[0] if cfg['interface']=='auto' and netrows else selected+' unavailable'))
-    if cfg['show_network']: pieces.append(network)
+    metrics['network']=network
+    order=list(dict.fromkeys(cfg['metric_order'].split(',')+DEFAULTS['metric_order'].split(',')))
+    pieces=[metrics[k] for k in order if k in metrics and cfg.get('show_'+k,False)]
+    if cfg['compact']:
+        pieces=[v.replace('CPU ','C ').replace('RAM ','M ').replace('DISK ','D ').replace('SWAP ','S ') for v in pieces]
+    warning=(cpu_temp is not None and cpu_temp>=cfg['warning_temperature']) or used/mt*100>=cfg['warning_memory'] or (status=='Discharging' and percent is not None and percent<=cfg['warning_battery'])
+    if warning: pieces.insert(0,'⚠')
+    sample.warning=warning
     rows[15]=('Network', 'Selected: '+network+'\n\n'+'\n'.join(netrows))
     return cfg['separator'].join(pieces) or 'System',rows,note
 
 def panel():
     label,rows,note=sample()
     tip='\n'.join(f'{k}: {v}' for k,v in rows)+'\n\n'+note+'\nClick to open System & Power.'
-    color=settings()['accent']
+    cfg=settings()
+    color=cfg['warning_color'] if getattr(sample,'warning',False) else cfg['accent']
     if not settings()['tooltip']: tip='Click to open System & Power.'
     print(f'<txt><span foreground="{color}">{html.escape(label)}</span></txt>'
           f'<txtclick>{html.escape(str(Path.home()/".local/bin/system-power-widget"))} --window</txtclick>'
@@ -174,14 +179,14 @@ def window():
             app.get_active_window().present();return
         cfg=settings()
         win=Gtk.ApplicationWindow(application=app,title='System & Power')
-        win.set_default_size(800,760)
+        win.set_default_size(860,760)
         win.set_icon_name('utilities-system-monitor')
         outer=Gtk.Box(orientation=Gtk.Orientation.VERTICAL,spacing=16,margin=22)
         win.add(outer)
         title=Gtk.Label(xalign=0)
         title.set_markup('<span size="x-large" weight="bold">System &amp; Power</span>')
         outer.pack_start(title,False,False,0)
-        subtitle=Gtk.Label(label='THINKPAD  /  LIVE TELEMETRY',xalign=0)
+        subtitle=Gtk.Label(label='SYSTEM  /  LIVE TELEMETRY',xalign=0)
         subtitle.get_style_context().add_class('dim-label');outer.pack_start(subtitle,False,False,0)
         summary=Gtk.Label(xalign=0)
         summary.set_line_wrap(True);summary.set_max_width_chars(85)
@@ -203,21 +208,25 @@ def window():
             if name=='Power':
                 info=Gtk.Label(label=note,xalign=0);info.set_line_wrap(True);info.set_max_width_chars(82)
                 info.get_style_context().add_class('dim-label');info.set_margin_top(12);grid.attach(info,0,9,2,1)
-                policy=Gtk.Label(label='Charge care: 80% cap · top up on reconnect · no forced discharge',xalign=0)
-                policy.set_line_wrap(True);grid.attach(policy,0,10,2,1)
+                # Charge thresholds above reflect the active machine's controller.
             if name=='Network':
                 info=Gtk.Label(label='Rates are per interface. VPN and physical traffic overlap;\nthey are intentionally not added together.',xalign=0)
                 info.get_style_context().add_class('dim-label');grid.attach(info,0,2,2,1)
         settings_box=Gtk.Box(orientation=Gtk.Orientation.VERTICAL,spacing=14,margin=18)
         sc=Gtk.ScrolledWindow();sc.add(settings_box);notebook.append_page(sc,Gtk.Label(label='Settings'))
         controls={}
-        for key,caption in [('show_cpu','CPU usage in panel'),('show_memory','Memory usage in panel'),('show_temperature','CPU temperature in panel'),('show_network','Network speed in panel'),('show_power','Battery and power in panel'),('show_runtime','Runtime estimate in panel'),('show_swap','Swap usage in panel'),('show_disk','Disk usage in panel'),('tooltip','Detailed panel tooltip')]:
+        for key,caption in [('show_cpu','CPU usage in panel'),('show_memory','Memory usage in panel'),('show_temperature','CPU temperature in panel'),('show_network','Network speed in panel'),('show_power','Battery and power in panel'),('show_runtime','Runtime estimate in panel'),('show_swap','Swap usage in panel'),('show_disk','Disk usage in panel'),('tooltip','Detailed panel tooltip'),('compact','Compact panel labels')]:
             row=Gtk.Box(spacing=16);lab=Gtk.Label(label=caption,xalign=0);row.pack_start(lab,True,True,0)
             sw=Gtk.Switch();sw.set_active(cfg[key]);row.pack_end(sw,False,False,0);controls[key]=sw
             settings_box.pack_start(row,False,False,0)
         row=Gtk.Box(spacing=16);row.pack_start(Gtk.Label(label='Dashboard refresh interval (seconds)',xalign=0),True,True,0)
         spin=Gtk.SpinButton.new_with_range(2,30,1);spin.set_value(cfg['interval']);row.pack_end(spin,False,False,0)
         settings_box.pack_start(row,False,False,0)
+        extra_spins={}
+        for key,caption,lo,hi in [('panel_interval','Panel refresh interval (seconds)',2,30),('warning_temperature','Temperature warning (°C)',40,110),('warning_memory','Memory warning (%)',50,100),('warning_battery','Low battery warning (%)',5,50)]:
+            row=Gtk.Box(spacing=16);row.pack_start(Gtk.Label(label=caption,xalign=0),True,True,0)
+            field=Gtk.SpinButton.new_with_range(lo,hi,1);field.set_value(cfg[key]);row.pack_end(field,False,False,0)
+            settings_box.pack_start(row,False,False,0);extra_spins[key]=field
         choices={}
         def choice(key,caption,values):
             row=Gtk.Box(spacing=16);row.pack_start(Gtk.Label(label=caption,xalign=0),True,True,0)
@@ -230,27 +239,36 @@ def window():
         choice('memory_units','Panel memory format',['percent','GiB'])
         choice('separator','Panel separator',['  ·  ','  |  ','    '])
         entries={}
-        for key,caption in [('disk_path','Disk mount or directory'),('ping_target','Connectivity test IP / hostname')]:
+        for key,caption in [('disk_path','Disk mount or directory'),('ping_target','Connectivity test IP / hostname'),('metric_order','Order: power,cpu,memory,temperature,network,runtime,swap,disk')]:
             row=Gtk.Box(spacing=16);row.pack_start(Gtk.Label(label=caption,xalign=0),True,True,0)
+            lab=row.get_children()[0];lab.set_line_wrap(True);lab.set_max_width_chars(40)
             entry=Gtk.Entry();entry.set_text(cfg[key]);row.pack_end(entry,False,False,0)
             settings_box.pack_start(row,False,False,0);entries[key]=entry
         row=Gtk.Box(spacing=16);row.pack_start(Gtk.Label(label='Power averaging samples',xalign=0),True,True,0)
         average=Gtk.SpinButton.new_with_range(1,120,1);average.set_value(cfg['average_samples']);row.pack_end(average,False,False,0);settings_box.pack_start(row,False,False,0)
         row=Gtk.Box(spacing=16);row.pack_start(Gtk.Label(label='Panel accent colour',xalign=0),True,True,0)
         colour=Gtk.ColorButton();rgba=Gdk.RGBA();rgba.parse(cfg['accent']);colour.set_rgba(rgba);row.pack_end(colour,False,False,0);settings_box.pack_start(row,False,False,0)
+        warning_colour=Gtk.ColorButton();rgba=Gdk.RGBA();rgba.parse(cfg['warning_color']);warning_colour.set_rgba(rgba)
+        row=Gtk.Box(spacing=16);row.pack_start(Gtk.Label(label='Warning colour',xalign=0),True,True,0);row.pack_end(warning_colour,False,False,0);settings_box.pack_start(row,False,False,0)
         status=Gtk.Label(xalign=0);status.set_line_wrap(True)
         timer=[None]
         def update():
             label,data,_=sample()
-            summary.set_markup('<span foreground="#7dcfff" weight="bold">'+html.escape(label)+'</span>')
+            summary.set_markup('<span foreground="'+settings()['accent']+'" weight="bold">'+html.escape(label)+'</span>')
             for i,lab in labels.items(): lab.set_text(data[i][1])
             return True
         def save(button):
+            order=[v.strip() for v in entries['metric_order'].get_text().split(',')]
+            if len(order)!=8 or set(order)!=set(DEFAULTS['metric_order'].split(',')):
+                status.set_text('Order must contain each of the eight metric names exactly once.');return
             cfg.update({k:sw.get_active() for k,sw in controls.items()})
             if not Path(entries['disk_path'].get_text()).is_dir():
                 status.set_text('Choose an existing directory for disk usage.');return
             cfg.update({k:c.get_active_id() for k,c in choices.items()})
             cfg.update({k:e.get_text().strip() for k,e in entries.items()})
+            cfg['metric_order']=','.join(order)
+            cfg.update({k:w.get_value_as_int() for k,w in extra_spins.items()})
+            rgba=warning_colour.get_rgba();cfg['warning_color']='#%02x%02x%02x'%tuple(round(v*255) for v in [rgba.red,rgba.green,rgba.blue])
             cfg['average_samples']=average.get_value_as_int()
             rgba=colour.get_rgba();cfg['accent']='#%02x%02x%02x'%tuple(round(v*255) for v in [rgba.red,rgba.green,rgba.blue])
             cfg['interval']=spin.get_value_as_int()
@@ -258,12 +276,14 @@ def window():
             tmp=CONFIG.with_suffix('.tmp');tmp.write_text(json.dumps(cfg,indent=2));tmp.replace(CONFIG)
             if timer[0]: GLib.source_remove(timer[0])
             timer[0]=GLib.timeout_add_seconds(cfg['interval'],update)
-            status.set_text('Preferences saved. Panel refreshes every 5 seconds.')
+            result=subprocess.run(['xfconf-query','-c','xfce4-panel','-p','/plugins/plugin-20/update-period','-s',str(cfg['panel_interval']*1000)],capture_output=True,text=True)
+            status.set_text(f"Preferences saved. Panel refreshes every {cfg['panel_interval']} seconds." if result.returncode==0 else 'Preferences saved; panel interval could not be changed: '+result.stderr)
             update()
         save_button=Gtk.Button(label='Apply display preferences');save_button.connect('clicked',save)
         settings_box.pack_start(save_button,False,False,0)
         settings_box.pack_start(Gtk.Separator(),False,False,0)
         # Brightness uses the active session's standard elogind API; no root helper.
+        debounce=[None]
         backs=list(Path('/sys/class/backlight').iterdir())
         if backs:
             back=backs[0];maximum=num(back/'max_brightness');current=num(back/'brightness')
@@ -316,7 +336,7 @@ def window():
                 GLib.idle_add(done)
             threading.Thread(target=worker,daemon=True).start()
         test.connect('clicked',probe);settings_box.pack_start(test,False,False,0)
-        settings_box.pack_start(status,False,False,0)
+        outer.pack_start(status,False,False,0)
         bar=Gtk.Box(spacing=8)
         for caption,command in [('Task Manager',['xfce4-taskmanager']),('Power Settings',['xfce4-power-manager','-c']),('XFCE Settings',['xfce4-settings-manager'])]:
             button=Gtk.Button(label=caption)
@@ -328,6 +348,10 @@ def window():
         update();timer[0]=GLib.timeout_add_seconds(cfg['interval'],update)
         win.connect('destroy',lambda w:GLib.source_remove(timer[0]) if timer[0] else None)
         win.show_all()
+        def cleanup(*args):
+            if debounce[0]: GLib.source_remove(debounce[0])
+            CACHE.unlink(missing_ok=True)
+        win.connect('destroy',cleanup)
     app.connect('activate',activate);app.run([])
 if __name__=='__main__':
     if '--window' in sys.argv: window()

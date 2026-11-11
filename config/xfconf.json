@@ -1,6 +1,6 @@
 {
   "xsettings": {
-    "/Net/ThemeName": "TokyoNight",
+    "/Net/ThemeName": "AyuComfort",
     "/Net/IconThemeName": "Papirus-Dark",
     "/Gtk/FontName": "Inter 10",
     "/Gtk/MonospaceFontName": "JetBrains Mono 10",
@@ -10,7 +10,7 @@
     "/Xft/RGBA": "none"
   },
   "xfwm4": {
-    "/general/theme": "TokyoNight",
+    "/general/theme": "AyuComfort",
     "/general/title_font": "Inter SemiBold 10",
     "/general/title_alignment": "left",
     "/general/workspace_count": 4,
@@ -158,14 +158,14 @@
     "/font-name": "JetBrains Mono 11",
     "/font-use-system": false,
     "/color-use-theme": false,
-    "/color-foreground": "#c0caf5",
-    "/color-background": "#1a1b26",
-    "/color-cursor": "#c0caf5",
-    "/color-palette": "#414868;#f7768e;#9ece6a;#e0af68;#7aa2f7;#bb9af7;#7dcfff;#a9b1d6;#565f89;#f7768e;#9ece6a;#e0af68;#7aa2f7;#bb9af7;#7dcfff;#c0caf5",
+    "/color-foreground": "#bfbdb6",
+    "/color-background": "#151920",
+    "/color-cursor": "#bfbdb6",
+    "/color-palette": "#46515e;#df8585;#a8bb85;#d9ad72;#73a9c2;#c6a77b;#d9ad72;#a6a9ab;#6b747e;#df8585;#a8bb85;#d9ad72;#73a9c2;#c6a77b;#d9ad72;#bfbdb6",
     "/misc-menubar-default": false
   },
   "xfce4-notifyd": {
-    "/theme": "TokyoNight"
+    "/theme": "AyuComfort"
   },
   "xfce4-power-manager": {
     "/xfce4-power-manager/brightness-on-battery": 60,

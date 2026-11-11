@@ -17,7 +17,7 @@ def main():
  power=args.power=='auto' and model.exists() and model.read_text().strip()=='ThinkPad T495s'
  props=json.loads((ROOT/'config/xfconf.json').read_text())
  if args.dry_run:
-  print(json.dumps({'channels':{k:len(v) for k,v in props.items()},'power_profile':'ThinkPad T495s' if power else 'desktop only','backup':'~/.local/state/xfce-tokyo-night/backups/<timestamp>','files':'allowlisted repository payload only'},indent=2));return
+  print(json.dumps({'channels':{k:len(v) for k,v in props.items()},'power_profile':'ThinkPad T495s' if power else 'desktop only','backup':'~/.local/state/xfce4-setting/backups/<timestamp>','files':'allowlisted repository payload only'},indent=2));return
  if os.geteuid()==0: raise SystemExit('Run as your logged-in XFCE user.')
  import gi
  gi.require_version('Xfconf','0')
@@ -32,7 +32,7 @@ def main():
    cmd+=['-t',typ,'-s',str(v).lower() if isinstance(v,bool) else str(v).replace('@HOME@',str(HOME))]
   run(*cmd)
  import datetime
- backup=HOME/'.local/state/xfce-tokyo-night/backups'/datetime.datetime.now().strftime('%Y%m%d-%H%M%S-%f')
+ backup=HOME/'.local/state/xfce4-setting/backups'/datetime.datetime.now().strftime('%Y%m%d-%H%M%S-%f')
  backup.mkdir(parents=True,mode=0o700)
  shutil.copy2(ROOT/'restore.py',backup/'restore.py')
  before={}
@@ -61,7 +61,7 @@ def main():
   with tarfile.open(archive) as tar:tar.extractall(stage,filter='data')
   theme=next(stage.glob('tokyonight-xfce-*/TokyoNight'))
   for f in theme.rglob('*'):
-   if f.is_file():put(f,HOME/'.local/share/themes/TokyoNight'/f.relative_to(theme))
+   if f.is_file():put(f,HOME/'.local/share/themes/AyuComfort'/f.relative_to(theme))
   for family,font in [('inter','Inter[opsz,wght].ttf'),('jetbrainsmono','JetBrainsMono[wght].ttf')]:
    for name in [font,'OFL.txt']:
     dest=HOME/'.local/share/fonts/desktop'/(family+'-OFL.txt' if name=='OFL.txt' else name)
@@ -69,21 +69,26 @@ def main():
  for name in ['system-power-widget','eye-break-reminder']:put(ROOT/'bin'/name,HOME/'.local/bin'/name,True)
  put(ROOT/'config/gtk.css',HOME/'.config/gtk-3.0/gtk.css')
  put(ROOT/'config/fonts.conf',HOME/'.config/fontconfig/conf.d/60-local-fonts.conf')
- put(ROOT/'config/wallpaper.svg',HOME/'.local/share/backgrounds/tokyo-night-horizon.svg')
- put(ROOT/'config/widget.json',HOME/'.config/system-power-widget/settings.json')
+ put(ROOT/'config/wallpaper.svg',HOME/'.local/share/backgrounds/ayu-comfort-horizon.svg')
+ widget=HOME/'.config/system-power-widget/settings.json'
+ defaults=json.loads((ROOT/'config/widget.json').read_text())
+ if widget.exists():
+  try:
+   existing=json.loads(widget.read_text())
+   if isinstance(existing,dict): defaults.update(existing)
+  except (ValueError,OSError): pass
+ if defaults.get('accent')=='#7dcfff': defaults['accent']='#bfbdb6'
+ text(widget,json.dumps(defaults,indent=2))
+ props['xfce4-panel']['/plugins/plugin-20/update-period']=max(2,min(30,int(defaults.get('panel_interval',5))))*1000
  for name,cmd,category in [('system-power-widget','system-power-widget --window','System;Monitor;'),('eye-break-reminder','eye-break-reminder','Utility;')]:
   dest=HOME/('.config/autostart' if name=='eye-break-reminder' else '.local/share/applications')/(name+'.desktop')
   text(dest,f'[Desktop Entry]\nType=Application\nName={"System & Power" if name=="system-power-widget" else "Eye break reminder"}\nExec="{HOME}/.local/bin/{name}"'+(' --window' if name=='system-power-widget' else '')+f'\nIcon=utilities-system-monitor\nTerminal=false\nOnlyShowIn=XFCE;\nCategories={category}\n')
- # Theme fixes discovered during real screenshot reviews.
- css=HOME/'.local/share/themes/TokyoNight/gtk-3.0/gtk.css'
- colors={'theme_bg_color':'#1a1b26','theme_fg_color':'#c0caf5','theme_base_color':'#16161e','theme_text_color':'#c0caf5','theme_selected_bg_color':'#3b4261','theme_selected_fg_color':'#c0caf5','theme_unfocused_fg_color':'#a9b1d6','theme_unfocused_bg_color':'#1a1b26','theme_unfocused_base_color':'#16161e','theme_unfocused_text_color':'#a9b1d6','insensitive_fg_color':'#737aa2','insensitive_bg_color':'#24283b','borders':'#3b4261'}
- text(css,'\n'.join(f'@define-color {k} {v};' for k,v in colors.items())+'\n'+css.read_text()+'\n'+(ROOT/'config/gtk.css').read_text())
- wm=HOME/'.local/share/themes/TokyoNight/xfwm4/themerc';text(wm,wm.read_text().replace('inactive_text_color=#565f89','inactive_text_color=#a9b1d6'))
- put(ROOT/'config/notify.css',HOME/'.local/share/themes/TokyoNight/xfce-notify-4.0/gtk.css')
- # Predictable private permissions for future files, without exporting shell history/config.
- for name in ['.profile','.zshenv','.bashrc']:
-  dest=HOME/name;value=dest.read_text() if dest.exists() else ''
-  if '# xfce-tokyo-night permissions' not in value:text(dest,value+'\n# xfce-tokyo-night permissions\numask 077\n')
+ # Derive the GTK2/GTK3/XFWM theme from the pinned upstream assets.
+ from theme import recolor_theme
+ recolor_theme(HOME/'.local/share/themes/AyuComfort')
+ css=HOME/'.local/share/themes/AyuComfort/gtk-3.0/gtk.css'
+ text(css,css.read_text()+'\n'+(ROOT/'config/gtk.css').read_text())
+ put(ROOT/'config/notify.css',HOME/'.local/share/themes/AyuComfort/xfce-notify-4.0/gtk.css')
  # Discover the new machine's monitors instead of copying the original monitor names.
  desk=Xfconf.Channel.get('xfce4-desktop').get_properties('/')
  prefixes={k.rsplit('/workspace',1)[0] for k in desk if k.startswith('/backdrop/') and '/workspace' in k}
@@ -94,7 +99,7 @@ def main():
   prefixes={f'/backdrop/screen0/monitor{screen.get_monitor_plug_name(i)}' for i in range(screen.get_n_monitors())}
  for prefix in prefixes:
   for i in range(4):
-   for key,val in [('last-image',str(HOME/'.local/share/backgrounds/tokyo-night-horizon.svg')),('image-style',5)]:
+   for key,val in [('last-image',str(HOME/'.local/share/backgrounds/ayu-comfort-horizon.svg')),('image-style',5)]:
     path=prefix+f'/workspace{i}/'+key
     props['xfce4-desktop'][path]=val
  props['xfce4-desktop']['/backdrop/single-workspace-mode']=True
@@ -115,5 +120,5 @@ def main():
  if power:run('sudo','python3',str(ROOT/'system/apply-power.py'))
  shutil.copy2(ROOT/'restore.py',backup/'restore.py')
  print(f'Installed. Desktop rollback: python3 "{backup}/restore.py"')
- print('Log out and back in to apply the private umask and start the session reminder.')
+ print('Log out and back in to start the session reminder.')
 if __name__=='__main__':main()

@@ -1,4 +1,4 @@
-#XfceNotifyWindow { background-color: #24283b; color: #c0caf5; border: 1px solid #7aa2f7; border-radius: 9px; padding: 10px; }
-#XfceNotifyWindow label { color: #c0caf5; }
-#XfceNotifyWindow label#summary { color: #7dcfff; font-weight: bold; }
-#XfceNotifyWindow button { background-image: none; background-color: #343b58; color: #c0caf5; border-radius: 5px; }
+#XfceNotifyWindow { background-color: #1f242c; color: #bfbdb6; border: 1px solid #73a9c2; border-radius: 9px; padding: 10px; }
+#XfceNotifyWindow label { color: #bfbdb6; }
+#XfceNotifyWindow label#summary { color: #d9ad72; font-weight: bold; }
+#XfceNotifyWindow button { background-image: none; background-color: #343c47; color: #bfbdb6; border-radius: 5px; }

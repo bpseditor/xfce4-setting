@@ -1,48 +1,52 @@
-/* Local Tokyo Night panel styling */
-.xfce4-panel { background-color: #16161e; color: #c0caf5; border-bottom: 1px solid #292e42; }
+/* Ayu-inspired panel styling */
+.xfce4-panel { background-color: #0d1016; color: #bfbdb6; border-bottom: 1px solid #292f38; }
 .xfce4-panel button { border: 0; border-radius: 7px; margin: 3px 2px; padding: 2px 6px; background-image: none; box-shadow: none; }
-.xfce4-panel button:hover { background-color: #292e42; }
-.xfce4-panel button:checked { background-color: #3b4261; color: #7dcfff; }
-#genmon-20 { padding: 0 10px; margin: 4px 5px; border-radius: 8px; background-color: #24283b; }
-#clock-button { color: #bb9af7; padding: 0 10px; }
-tooltip { background-color: #1a1b26; color: #c0caf5; border: 1px solid #414868; border-radius: 8px; }
+.xfce4-panel button:hover { background-color: #292f38; }
+.xfce4-panel button:checked { background-color: #384451; color: #d9ad72; }
+#genmon-20 { padding: 0 10px; margin: 4px 5px; border-radius: 8px; background-color: #1f242c; }
+#clock-button { color: #c6a77b; padding: 0 10px; }
+tooltip { background-color: #151920; color: #bfbdb6; border: 1px solid #46515e; border-radius: 8px; }
 
 /* Keep inactive windows legible rather than fading all telemetry. */
-.background:backdrop { color: #c0caf5; }
-.background:backdrop label { color: #a9b1d6; }
-.dim-label, .dim-label:backdrop { color: #a9b1d6; opacity: 1; }
-notebook > header tab:checked label { color: #7dcfff; }
+.background:backdrop { color: #bfbdb6; }
+.background:backdrop label { color: #a6a9ab; }
+.dim-label, .dim-label:backdrop { color: #a6a9ab; opacity: 1; }
+notebook > header tab:checked label { color: #d9ad72; }
 
 /* Screenshot review: readable selected categories and usable controls. */
 window:not(.xfce4-panel) button:not(.flat) {
- background-image: none; background-color: #24283b; color: #c0caf5;
- border: 1px solid #3b4261; border-radius: 6px; padding: 4px 10px; min-height: 24px;
+ background-image: none; background-color: #1f242c; color: #bfbdb6;
+ border: 1px solid #384451; border-radius: 6px; padding: 4px 10px; min-height: 24px;
 }
-window:not(.xfce4-panel) button:not(.flat):hover { background-color: #343b58; border-color: #7aa2f7; }
-window:not(.xfce4-panel) button:not(.flat):checked { background-color: #3b4261; color: #c0caf5; }
-window:not(.xfce4-panel) button:not(.flat):disabled { color: #737aa2; }
-#whiskermenu-window button:checked, #whiskermenu-window button:checked label { color: #c0caf5; background-color: #292e42; }
+window:not(.xfce4-panel) button:not(.flat):hover { background-color: #343c47; border-color: #73a9c2; }
+window:not(.xfce4-panel) button:not(.flat):checked { background-color: #384451; color: #bfbdb6; }
+window:not(.xfce4-panel) button:not(.flat):disabled { color: #7c858f; }
+#whiskermenu-window button:checked, #whiskermenu-window button:checked label { color: #bfbdb6; background-color: #292f38; }
 notebook > header tab { padding: 6px 12px; }
-notebook > header tab:checked { border-bottom: 2px solid #7dcfff; }
-infobar.info, infobar.info:backdrop { background-color: #24283b; color: #c0caf5; }
-infobar.info label, infobar.info:backdrop label { color: #c0caf5; }
+notebook > header tab:checked { border-bottom: 2px solid #d9ad72; }
+infobar.info, infobar.info:backdrop { background-color: #1f242c; color: #bfbdb6; }
+infobar.info label, infobar.info:backdrop label { color: #bfbdb6; }
 XfdesktopIconView { -XfdesktopIconView-cell-text-width-proportion: 2.8; -XfdesktopIconView-cell-spacing: 4; -XfdesktopIconView-cell-padding: 6; }
 
-#xfwm-tabwin { background-color: #1a1b26; color: #c0caf5; border: 1px solid #7aa2f7; border-radius: 10px; padding: 10px; }
-#xfwm-tabwin label, #xfwm-tabwin button label { color: #c0caf5; }
-#xfwm-tabwin button:checked, #xfwm-tabwin button:hover { background-color: #343b58; color: #c0caf5; }
+#xfwm-tabwin { background-color: #151920; color: #bfbdb6; border: 1px solid #73a9c2; border-radius: 10px; padding: 10px; }
+#xfwm-tabwin label, #xfwm-tabwin button label { color: #bfbdb6; }
+#xfwm-tabwin button:checked, #xfwm-tabwin button:hover { background-color: #343c47; color: #bfbdb6; }
 
 /* Unified surfaces: boundaries belong to containers, not every child. */
 window:not(.xfce4-panel) notebook { border: none; background-color: transparent; }
 window:not(.xfce4-panel) notebook > header { background: transparent; border: none; box-shadow: none; padding: 0 0 8px; }
 window:not(.xfce4-panel) notebook > header tab { background: transparent; border: none; box-shadow: none; border-radius: 6px; margin: 0 4px 0 0; padding: 7px 14px; }
-window:not(.xfce4-panel) notebook > header tab:checked { background: #292e42; border: none; }
-window:not(.xfce4-panel) notebook > stack { background: #202332; border: none; border-radius: 10px; }
+window:not(.xfce4-panel) notebook > header tab:checked { background: #292f38; border: none; }
+window:not(.xfce4-panel) notebook > stack { background: #191e26; border: none; border-radius: 10px; }
 window:not(.xfce4-panel) scrolledwindow { border: none; box-shadow: none; }
 window:not(.xfce4-panel) scrolledwindow undershoot { background: none; }
-window:not(.xfce4-panel) button:not(.flat) { border-color: transparent; background-image: none; background-color: #292e42; box-shadow: none; border-radius: 7px; }
-window:not(.xfce4-panel) button:not(.flat):hover { border-color: transparent; background-color: #343b58; }
-window:not(.xfce4-panel) entry, window:not(.xfce4-panel) spinbutton { border: 1px solid #343b58; border-radius: 7px; box-shadow: none; background: #16161e; }
+window:not(.xfce4-panel) button:not(.flat) { border-color: transparent; background-image: none; background-color: #292f38; box-shadow: none; border-radius: 7px; }
+window:not(.xfce4-panel) button:not(.flat):hover { border-color: transparent; background-color: #343c47; }
+window:not(.xfce4-panel) entry, window:not(.xfce4-panel) spinbutton { border: 1px solid #343c47; border-radius: 7px; box-shadow: none; background: #0d1016; }
 window:not(.xfce4-panel) spinbutton button { border: none; border-radius: 0; background: transparent; }
-separator { min-width: 1px; min-height: 1px; background-color: #292e42; }
+separator { min-width: 1px; min-height: 1px; background-color: #292f38; }
 .xfce4-panel separator { background: transparent; }
+
+calendar { color: #bfbdb6; }
+calendar:indeterminate { color: #7c858f; }
+calendar:selected { color: #151920; background-color: #d9ad72; }

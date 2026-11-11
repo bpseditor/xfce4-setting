@@ -11,7 +11,7 @@ if RUNTIME.stat().st_uid != os.getuid():
 CACHE = RUNTIME / (f'dashboard-{os.getpid()}.json' if '--window' in sys.argv else 'panel.json')
 
 CONFIG = Path.home()/'.config/system-power-widget/settings.json'
-DEFAULTS = dict(interval=5, show_cpu=True, show_memory=True, show_temperature=True, show_network=False)
+DEFAULTS = dict(interval=5, show_cpu=True, show_memory=True, show_temperature=True, show_network=False, show_power=True, show_runtime=False, show_swap=False, show_disk=False, interface="auto", network_units="KiB/s", memory_units="percent", disk_path="/", average_samples=24, separator="  ·  ", accent="#7dcfff", tooltip=True, ping_target="1.1.1.1")
 def settings():
     try: stored=json.loads(CONFIG.read_text())
     except (OSError,ValueError): stored={}
@@ -19,6 +19,9 @@ def settings():
     for key,val in stored.items():
         if key in cfg and type(val) is type(cfg[key]): cfg[key]=val
     cfg['interval']=max(2,min(30,cfg['interval']))
+    cfg['average_samples']=max(1,min(120,cfg['average_samples']))
+    import re
+    if not re.fullmatch(r'#[0-9a-fA-F]{6}',cfg['accent']): cfg['accent']=DEFAULTS['accent']
     return cfg
 
 def read(p, default='—'):
@@ -37,6 +40,7 @@ def duration(hours):
     return f'{int(hours * 60) // 60} h {int(hours * 60) % 60:02d} min'
 
 def sample():
+    cfg=settings()
     now = time.monotonic()
     try: prev = json.loads(CACHE.read_text())
     except (OSError, ValueError): prev = {}
@@ -62,7 +66,8 @@ def sample():
         old = prev.get('net',{}).get(p.name)
         speed = ''
         if valid and old:
-            speed=f' ↓ {max(0,rx-old[0])/elapsed/1024:.0f} ↑ {max(0,tx-old[1])/elapsed/1024:.0f} KiB/s'
+            unit=cfg['network_units'];factor={'KiB/s':1024,'MiB/s':1048576,'Mbit/s':125000}.get(unit,1024)
+            speed=f' ↓ {max(0,rx-old[0])/elapsed/factor:.1f} ↑ {max(0,tx-old[1])/elapsed/factor:.1f} {unit}'
         netrows.append(p.name+speed)
     status = read(BAT/'status')
     ac = any(read(p/'online') == '1' for p in Path('/sys/class/power_supply').iterdir() if read(p/'type') != 'Battery')
@@ -70,7 +75,7 @@ def sample():
     percent = num(BAT/'capacity')
     start,end = num(BAT/'charge_control_start_threshold'),num(BAT/'charge_control_end_threshold')
     history = prev.get('power',[]) if valid and prev.get('status') == status and prev.get('ac') == ac else []
-    if power is not None: history = (history + [[now,power]])[-24:]
+    if power is not None: history = (history + [[now,power]])[-cfg['average_samples']:]
     smooth = statistics.mean(x[1] for x in history) if history else None
     eta = energy/smooth if status == 'Discharging' and energy is not None and smooth and smooth > 0.5 else None
     temps,fan = [],[]
@@ -87,7 +92,8 @@ def sample():
             if v is not None: fan.append(f'{v:.0f} RPM')
     freqs=[num(p,1000) for p in Path('/sys/devices/system/cpu').glob('cpu[0-9]*/cpufreq/scaling_cur_freq')]
     freqs=[v for v in freqs if v is not None]
-    disk=shutil.disk_usage('/')
+    try: disk=shutil.disk_usage(cfg['disk_path'])
+    except OSError: disk=shutil.disk_usage('/')
     bright=[]
     for p in Path('/sys/class/backlight').iterdir():
         v,m=num(p/'brightness'),num(p/'max_brightness')
@@ -118,7 +124,7 @@ def sample():
       ('Fan',' · '.join(dict.fromkeys(fan)) or '—'),
       ('Memory',f'{used:.1f} / {mt:.1f} GiB ({used/mt*100:.0f}%)'),
       ('Swap',f'{swap:.1f} / {mem["SwapTotal"]/1048576:.1f} GiB'),
-      ('Disk /',f'Free {disk.free/2**30:.1f} GiB · used {disk.used/disk.total*100:.0f}%'),
+      ('Disk '+cfg['disk_path'],f'Free {disk.free/2**30:.1f} GiB · used {disk.used/disk.total*100:.0f}%'),
       ('Network','\n'.join(netrows) or 'No active interfaces'),
       ('Brightness',' · '.join(bright) or '—'),
       ('Uptime',duration(uptime/3600)),
@@ -130,19 +136,29 @@ def sample():
     data={'t':now,'cpu':total,'idle':idle,'net':net,'power':history,'status':status,'ac':ac}
     tmp=CACHE.with_suffix('.tmp');tmp.write_text(json.dumps(data));tmp.replace(CACHE)
     cfg = settings()
-    pieces = [label]
+    pieces = [label] if cfg['show_power'] else []
+    if cfg['show_runtime']: pieces.append('ETA '+duration(eta))
+    if cfg['show_swap']: pieces.append(f'SWAP {swap:.1f}G')
+    if cfg['show_disk']: pieces.append(f'DISK {disk.used/disk.total*100:.0f}%')
     if cfg['show_cpu']: pieces.append(f'CPU {fmt(busy,"%",0)}')
-    if cfg['show_memory']: pieces.append(f'RAM {used/mt*100:.0f}%')
+    if cfg['show_memory']: pieces.append(f'RAM {used/mt*100:.0f}%' if cfg['memory_units']=='percent' else f'RAM {used:.1f}G')
     if cfg['show_temperature']:
         cpu_temp = next((num(p,1000) for hw in Path('/sys/class/hwmon').glob('hwmon*') if read(hw/'name')=='k10temp' for p in hw.glob('temp*_input')), None)
         pieces.append(fmt(cpu_temp,'°',0))
-    if cfg['show_network'] and netrows: pieces.append('NET '+next((x for x in netrows if x.startswith('wlp')),netrows[0]).split(' ',1)[-1])
-    return '  ·  '.join(pieces),rows,note
+    selected=cfg['interface']
+    if selected=='auto':
+        routes=read('/proc/net/route','').splitlines()[1:]
+        selected=next((line.split()[0] for line in routes if len(line.split())>1 and line.split()[1]=='00000000'), '')
+    network=next((x for x in netrows if x.split()[0]==selected), (netrows[0] if cfg['interface']=='auto' and netrows else selected+' unavailable'))
+    if cfg['show_network']: pieces.append(network)
+    rows[15]=('Network', 'Selected: '+network+'\n\n'+'\n'.join(netrows))
+    return cfg['separator'].join(pieces) or 'System',rows,note
 
 def panel():
     label,rows,note=sample()
     tip='\n'.join(f'{k}: {v}' for k,v in rows)+'\n\n'+note+'\nClick to open System & Power.'
-    color='#e0af68' if read(BAT/'status') == 'Discharging' else '#7dcfff'
+    color=settings()['accent']
+    if not settings()['tooltip']: tip='Click to open System & Power.'
     print(f'<txt><span foreground="{color}">{html.escape(label)}</span></txt>'
           f'<txtclick>{html.escape(str(Path.home()/".local/bin/system-power-widget"))} --window</txtclick>'
           f'<tool>{html.escape(tip)}</tool>')
@@ -158,7 +174,7 @@ def window():
             app.get_active_window().present();return
         cfg=settings()
         win=Gtk.ApplicationWindow(application=app,title='System & Power')
-        win.set_default_size(760,650)
+        win.set_default_size(800,760)
         win.set_icon_name('utilities-system-monitor')
         outer=Gtk.Box(orientation=Gtk.Orientation.VERTICAL,spacing=16,margin=22)
         win.add(outer)
@@ -195,13 +211,33 @@ def window():
         settings_box=Gtk.Box(orientation=Gtk.Orientation.VERTICAL,spacing=14,margin=18)
         sc=Gtk.ScrolledWindow();sc.add(settings_box);notebook.append_page(sc,Gtk.Label(label='Settings'))
         controls={}
-        for key,caption in [('show_cpu','CPU usage in panel'),('show_memory','Memory usage in panel'),('show_temperature','CPU temperature in panel'),('show_network','Network speed in panel')]:
+        for key,caption in [('show_cpu','CPU usage in panel'),('show_memory','Memory usage in panel'),('show_temperature','CPU temperature in panel'),('show_network','Network speed in panel'),('show_power','Battery and power in panel'),('show_runtime','Runtime estimate in panel'),('show_swap','Swap usage in panel'),('show_disk','Disk usage in panel'),('tooltip','Detailed panel tooltip')]:
             row=Gtk.Box(spacing=16);lab=Gtk.Label(label=caption,xalign=0);row.pack_start(lab,True,True,0)
             sw=Gtk.Switch();sw.set_active(cfg[key]);row.pack_end(sw,False,False,0);controls[key]=sw
             settings_box.pack_start(row,False,False,0)
         row=Gtk.Box(spacing=16);row.pack_start(Gtk.Label(label='Dashboard refresh interval (seconds)',xalign=0),True,True,0)
         spin=Gtk.SpinButton.new_with_range(2,30,1);spin.set_value(cfg['interval']);row.pack_end(spin,False,False,0)
         settings_box.pack_start(row,False,False,0)
+        choices={}
+        def choice(key,caption,values):
+            row=Gtk.Box(spacing=16);row.pack_start(Gtk.Label(label=caption,xalign=0),True,True,0)
+            combo=Gtk.ComboBoxText()
+            for value in dict.fromkeys(values+[cfg[key]]):combo.append(value,value)
+            combo.set_active_id(cfg[key]);row.pack_end(combo,False,False,0)
+            settings_box.pack_start(row,False,False,0);choices[key]=combo
+        choice('interface','Network interface',['auto']+[p.name for p in sorted(Path('/sys/class/net').iterdir()) if p.name!='lo'])
+        choice('network_units','Network rate units',['KiB/s','MiB/s','Mbit/s'])
+        choice('memory_units','Panel memory format',['percent','GiB'])
+        choice('separator','Panel separator',['  ·  ','  |  ','    '])
+        entries={}
+        for key,caption in [('disk_path','Disk mount or directory'),('ping_target','Connectivity test IP / hostname')]:
+            row=Gtk.Box(spacing=16);row.pack_start(Gtk.Label(label=caption,xalign=0),True,True,0)
+            entry=Gtk.Entry();entry.set_text(cfg[key]);row.pack_end(entry,False,False,0)
+            settings_box.pack_start(row,False,False,0);entries[key]=entry
+        row=Gtk.Box(spacing=16);row.pack_start(Gtk.Label(label='Power averaging samples',xalign=0),True,True,0)
+        average=Gtk.SpinButton.new_with_range(1,120,1);average.set_value(cfg['average_samples']);row.pack_end(average,False,False,0);settings_box.pack_start(row,False,False,0)
+        row=Gtk.Box(spacing=16);row.pack_start(Gtk.Label(label='Panel accent colour',xalign=0),True,True,0)
+        colour=Gtk.ColorButton();rgba=Gdk.RGBA();rgba.parse(cfg['accent']);colour.set_rgba(rgba);row.pack_end(colour,False,False,0);settings_box.pack_start(row,False,False,0)
         status=Gtk.Label(xalign=0);status.set_line_wrap(True)
         timer=[None]
         def update():
@@ -211,6 +247,12 @@ def window():
             return True
         def save(button):
             cfg.update({k:sw.get_active() for k,sw in controls.items()})
+            if not Path(entries['disk_path'].get_text()).is_dir():
+                status.set_text('Choose an existing directory for disk usage.');return
+            cfg.update({k:c.get_active_id() for k,c in choices.items()})
+            cfg.update({k:e.get_text().strip() for k,e in entries.items()})
+            cfg['average_samples']=average.get_value_as_int()
+            rgba=colour.get_rgba();cfg['accent']='#%02x%02x%02x'%tuple(round(v*255) for v in [rgba.red,rgba.green,rgba.blue])
             cfg['interval']=spin.get_value_as_int()
             CONFIG.parent.mkdir(parents=True,exist_ok=True)
             tmp=CONFIG.with_suffix('.tmp');tmp.write_text(json.dumps(cfg,indent=2));tmp.replace(CONFIG)
@@ -255,6 +297,25 @@ def window():
             status.set_text('Presentation mode updated.' if not r.returncode else r.stderr)
         presentation.get_child().set_line_wrap(True)
         presentation.connect('toggled',set_presentation);settings_box.pack_start(presentation,False,False,0)
+        test=Gtk.Button(label='Test connectivity on selected interface')
+        def probe(button):
+            import re,threading
+            target=entries['ping_target'].get_text().strip();interface=choices['interface'].get_active_id()
+            if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9.:-]{0,252}',target):
+                status.set_text('Enter an IP address or hostname.');return
+            button.set_sensitive(False);status.set_text('Testing connectivity…')
+            def worker():
+                cmd=['ping','-n','-c','2','-W','2']
+                if interface!='auto':cmd+=['-I',interface]
+                cmd+=[target]
+                try:
+                    result=subprocess.run(cmd,capture_output=True,text=True,timeout=8)
+                    message=('Reachable' if result.returncode==0 else 'No ICMP reply (this does not necessarily mean no internet)')+' · '+interface+' · '+target
+                except (OSError,subprocess.TimeoutExpired) as exc:message=str(exc)
+                def done():status.set_text(message);button.set_sensitive(True);return False
+                GLib.idle_add(done)
+            threading.Thread(target=worker,daemon=True).start()
+        test.connect('clicked',probe);settings_box.pack_start(test,False,False,0)
         settings_box.pack_start(status,False,False,0)
         bar=Gtk.Box(spacing=8)
         for caption,command in [('Task Manager',['xfce4-taskmanager']),('Power Settings',['xfce4-power-manager','-c']),('XFCE Settings',['xfce4-settings-manager'])]:

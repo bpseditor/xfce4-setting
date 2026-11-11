@@ -37,7 +37,8 @@ The bootstrap tracks `main`; for a frozen installation, check out a specific Git
 - Inter UI font and JetBrains Mono terminal font; Noto CJK and emoji fallback.
 - One 36px panel: application menu, four workspaces, application buttons, unified telemetry, tray, audio, keyboard layout, notifications, date and time.
 - English **System & Power** dashboard: battery flow, watts, runtime estimate, charge thresholds, CPU, temperatures, fan, memory, swap, disk and network rates.
-- Dashboard preferences for panel metrics, window refresh interval, brightness and presentation mode. Panel updates every five seconds.
+- Dashboard preferences for each panel metric, window refresh interval, network interface, network units, memory format, disk path, averaging, separator, accent colour, tooltip, brightness and presentation mode. Panel updates every five seconds.
+- Manual ICMP connectivity test bound to the selected interface, with a configurable IP/hostname. No periodic probes. A missing ICMP reply does not prove internet failure. `auto` telemetry uses the IPv4 default-route interface where available; explicit interface selection is recommended for VPN/policy-routing setups.
 - English eye-break reminder every 20 minutes, started after XFCE login, with duplicate-instance protection.
 - Four workspaces; `Ctrl+1…4` switches and `Alt+1…4` moves a window. Workspace add/delete bindings (`Alt+Insert`, `Alt+Delete`) are disabled.
 - Personal window bindings, including `Alt+Left/Right` tiling and `Alt+AudioMicMute` closing a window. These replace the corresponding XFCE bindings; review `config/xfconf.json` if sharing this profile.

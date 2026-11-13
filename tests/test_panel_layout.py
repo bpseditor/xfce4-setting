@@ -60,8 +60,7 @@ class PanelLayoutTests(unittest.TestCase):
                     panel()
                 outputs.append(output.getvalue())
         self.assertIn('font_family="monospace"', outputs[0])
-        self.assertEqual(outputs[0].replace('alpha="1"', 'alpha="65535"')
-                         .replace(cfg['accent'], cfg['warning_color']), outputs[1])
+        self.assertEqual(outputs[0].replace('alpha="1"', 'alpha="65535"'), outputs[1])
 
     def test_network_abbreviations_preserve_the_selected_units(self):
         network = widget['panel_network']
@@ -73,3 +72,45 @@ class PanelLayoutTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+class SettingsTests(unittest.TestCase):
+    def test_order_is_normalized_and_missing_metrics_are_restored(self):
+        import tempfile, json
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'settings.json'
+            path.write_text(json.dumps({'metric_order':' cpu,cpu,unknown,power', 'panel_font':'', 'network_units':'oops'}))
+            with patch.dict(widget['settings'].__globals__,CONFIG=path):
+                cfg=widget['settings']()
+            self.assertEqual(cfg['metric_order'].split(',')[:2],['cpu','power'])
+            self.assertEqual(len(cfg['metric_order'].split(',')),8)
+            self.assertEqual(cfg['panel_font'],widget['DEFAULTS']['panel_font'])
+            self.assertEqual(cfg['network_units'],'KiB/s')
+
+    def test_preferences_round_trip(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'nested/settings.json'
+            cfg=dict(widget['DEFAULTS'],panel_font='Sans 12',metric_order='disk,swap,runtime,network,temperature,memory,cpu,power',show_cpu=False)
+            with patch.dict(widget['settings'].__globals__,CONFIG=path):
+                widget['save_settings'](cfg)
+                self.assertEqual(widget['settings'](),cfg)
+            self.assertEqual(list(path.parent.iterdir()),[path])
+
+    def test_compact_is_materially_shorter(self):
+        helper=PanelLayoutTests()
+        full=helper.values(dict(widget['DEFAULTS'],compact=False))
+        compact=helper.values(dict(widget['DEFAULTS'],compact=True))
+        self.assertLess(sum(map(len,compact.values())),sum(map(len,full.values()))*0.8)
+
+class AlertTests(unittest.TestCase):
+    def test_only_triggered_metric_is_colored_and_markup_is_escaped(self):
+        cfg=widget['DEFAULTS']
+        alerts=widget['warning_metrics'](cfg,status='Charging',percent=10,cpu_temp=85,memory_percent=20)
+        self.assertEqual(set(alerts),{'temperature'})
+        result=widget['metric_markup']([('cpu','C 10%'),('temperature','85°'),('network','<&>')],alerts,cfg,' | ')
+        self.assertEqual(result,f'C 10% | <span foreground="{cfg["warning_color"]}">85°</span> | &lt;&amp;&gt;')
+    def test_simultaneous_alerts_and_recovery(self):
+        cfg=widget['DEFAULTS'];warnings=widget['warning_metrics']
+        self.assertEqual(set(warnings(cfg,status='Discharging',percent=20,cpu_temp=80,memory_percent=90)),{'power','temperature','memory'})
+        self.assertEqual(warnings(cfg,status='Discharging',percent=21,cpu_temp=79,memory_percent=89),{})
+        self.assertEqual(warnings(cfg,status='Charging',percent=10,cpu_temp=None,memory_percent=0),{})

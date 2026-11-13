@@ -5,7 +5,7 @@
   "warning_memory": 90,
   "warning_battery": 20,
   "warning_color": "#df8585",
-  "compact": false,
+  "compact": true,
   "metric_order": "power,cpu,memory,temperature,network,runtime,swap,disk",
   "show_cpu": true,
   "show_memory": true,
@@ -20,7 +20,8 @@
   "memory_units": "GiB",
   "disk_path": "/",
   "average_samples": 24,
-  "separator": "  |  ",
+  "separator": " \u00b7 ",
   "accent": "#e0ded8",
-  "tooltip": true
+  "tooltip": true,
+  "panel_font": "Monospace 9"
 }

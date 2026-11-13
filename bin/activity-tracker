@@ -20,19 +20,65 @@ DATA = Path(os.environ.get('XDG_DATA_HOME', str(Path.home()/'.local/share'))) / 
 DATA.mkdir(parents=True, exist_ok=True)
 CONFIG = DATA/'settings.json'
 
+DISPLAY_DEFAULTS=dict(compact=True,panel_font='Monospace 9',name_length=12,
+    show_timer=True,show_app=True,show_daily=False,show_distracted=False,
+    idle_mode='media',idle_seconds=60,
+    panel_order='timer,app,daily,distracted')
+
 def settings():
-    try:
-        c = json.loads(CONFIG.read_text())
-        apps = c.get('distracting', [])
-        return {'paused': c.get('paused') is True, 'distracting': sorted(set(a for a in apps if isinstance(a,str))) if isinstance(apps,list) else []}
-    except (OSError, ValueError, AttributeError):
-        return {'paused': False, 'distracting': []}
+    try: c=json.loads(CONFIG.read_text())
+    except (OSError,ValueError): c={}
+    if not isinstance(c,dict): c={}
+    cfg=dict(DISPLAY_DEFAULTS)
+    for key,value in c.items():
+        if key in cfg and type(value) is type(cfg[key]): cfg[key]=value
+    apps=c.get('distracting',[])
+    cfg.update(paused=c.get('paused') is True,distracting=sorted(set(a for a in apps if isinstance(a,str))) if isinstance(apps,list) else [])
+    cfg['idle_seconds']=max(30,min(3600,cfg['idle_seconds']))
+    if cfg['idle_mode'] not in ('media','input','foreground'): cfg['idle_mode']='media'
+    cfg['name_length']=max(4,min(30,cfg['name_length']))
+    if not cfg['panel_font'].strip(): cfg['panel_font']=DISPLAY_DEFAULTS['panel_font']
+    known=DISPLAY_DEFAULTS['panel_order'].split(',')
+    cfg['panel_order']=','.join(dict.fromkeys([k.strip() for k in cfg['panel_order'].split(',') if k.strip() in known]+known))
+    return cfg
+
+def save_settings(cfg):
+    CONFIG.parent.mkdir(parents=True,exist_ok=True)
+    with tempfile.NamedTemporaryFile(mode='w',dir=CONFIG.parent,delete=False) as f:
+        temp=Path(f.name);json.dump(cfg,f,ensure_ascii=False,indent=2)
+    try: temp.replace(CONFIG)
+    finally: temp.unlink(missing_ok=True)
+
+def short_duration(seconds):
+    seconds=max(0,int(seconds))
+    return f'{seconds//3600}:{seconds%3600//60:02d}:{seconds%60:02d}' if seconds>=3600 else f'{seconds//60:02d}:{seconds%60:02d}'
 
 def database():
     db = sqlite3.connect(DATA/'activity.sqlite3', timeout=5)
     db.execute('PRAGMA journal_mode=WAL')
     db.execute('CREATE TABLE IF NOT EXISTS usage(day TEXT, app TEXT, seconds REAL, switches INTEGER, PRIMARY KEY(day,app))')
+    db.execute('PRAGMA foreign_keys=ON')
     db.execute("CREATE TABLE IF NOT EXISTS timers(id INTEGER PRIMARY KEY, name TEXT NOT NULL, seconds INTEGER NOT NULL, remaining REAL NOT NULL, deadline REAL, state TEXT NOT NULL DEFAULT 'ready')")
+    migration = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='timer_periods'").fetchone() is None
+    # Every start/resume adds a timer interval. Keeping intervals lets the
+    # collector account accurately across pauses between one-second samples.
+    db.execute('''CREATE TABLE IF NOT EXISTS timer_periods(
+        id INTEGER PRIMARY KEY, timer_id INTEGER NOT NULL, started REAL NOT NULL,
+        ends REAL NOT NULL, seen INTEGER NOT NULL DEFAULT 0,
+        FOREIGN KEY(timer_id) REFERENCES timers(id) ON DELETE CASCADE)''')
+    db.execute('''CREATE TABLE IF NOT EXISTS timer_usage(
+        timer_id INTEGER NOT NULL, app TEXT NOT NULL,
+        seconds REAL NOT NULL DEFAULT 0, switches INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY(timer_id,app),
+        FOREIGN KEY(timer_id) REFERENCES timers(id) ON DELETE CASCADE)''')
+    db.execute('CREATE INDEX IF NOT EXISTS timer_periods_range ON timer_periods(started,ends)')
+    if migration:
+        # Existing running timers keep working after the upgrade. Earlier
+        # timer-scoped app data cannot be reconstructed retrospectively.
+        db.execute('''INSERT INTO timer_periods(timer_id,started,ends)
+            SELECT id,deadline-remaining,deadline FROM timers
+            WHERE state='running' AND deadline IS NOT NULL''')
+        db.commit()
     return db
 
 def record(db, start, end, app, switch):
@@ -45,10 +91,17 @@ def record(db, start, end, app, switch):
         start, switch = stop, False
     db.commit()
 
-def rows(days=1):
+def rows(days=1, day=None):
     with contextlib.closing(database()) as db:
-        since = str(D.date.today()-D.timedelta(days=days-1))
-        return db.execute('SELECT app,sum(seconds),sum(switches) FROM usage WHERE day>=? AND day<=? GROUP BY app ORDER BY sum(seconds) DESC, app', (since,str(D.date.today()))).fetchall()
+        until = D.date.fromisoformat(str(day)) if day is not None else D.date.today()
+        since = str(until if day is not None else until-D.timedelta(days=days-1))
+        return db.execute('SELECT app,sum(seconds),sum(switches) FROM usage WHERE day>=? AND day<=? GROUP BY app ORDER BY sum(seconds) DESC, app', (since,str(until))).fetchall()
+
+def timer_usage_rows(timer_id):
+    """App statistics for the current run of one timer, not daily totals."""
+    with contextlib.closing(database()) as db:
+        return db.execute('''SELECT app,seconds,switches FROM timer_usage
+            WHERE timer_id=? ORDER BY seconds DESC, app''', (timer_id,)).fetchall()
 
 def duration(seconds):
     return f'{int(seconds)//3600:02d}:{int(seconds)//60%60:02d}:{int(seconds)%60:02d}'
@@ -65,7 +118,8 @@ def add_timer(name, seconds):
     if not name or len(name)>60 or not 1 <= seconds <= 86400:
         raise ValueError('Enter a name (1–60 characters) and a duration up to 24 hours.')
     with contextlib.closing(database()) as db, db:
-        db.execute('INSERT INTO timers(name,seconds,remaining) VALUES(?,?,?)',(name,seconds,seconds))
+        cursor=db.execute('INSERT INTO timers(name,seconds,remaining) VALUES(?,?,?)',(name,seconds,seconds))
+        return cursor.lastrowid
 
 def timer_action(timer_id, action, now=None):
     now=time.time() if now is None else now
@@ -73,13 +127,29 @@ def timer_action(timer_id, action, now=None):
         db.execute('BEGIN IMMEDIATE')
         row=db.execute('SELECT id,name,seconds,remaining,deadline,state FROM timers WHERE id=?',(timer_id,)).fetchone()
         if row is None: return
-        if action=='delete': db.execute('DELETE FROM timers WHERE id=?',(timer_id,))
-        elif action=='reset': db.execute("UPDATE timers SET remaining=seconds,deadline=NULL,state='ready' WHERE id=?",(timer_id,))
+        if action=='delete':
+            db.execute('DELETE FROM timers WHERE id=?',(timer_id,))
+        elif action=='reset':
+            db.execute("UPDATE timers SET remaining=seconds,deadline=NULL,state='ready' WHERE id=?",(timer_id,))
+            db.execute('DELETE FROM timer_periods WHERE timer_id=?',(timer_id,))
+            db.execute('DELETE FROM timer_usage WHERE timer_id=?',(timer_id,))
+        elif action=='stop' and row[5] in ('running','paused'):
+            db.execute("UPDATE timers SET remaining=?,deadline=NULL,state='stopped' WHERE id=?",(remaining_timer(row,now),timer_id))
+            db.execute('UPDATE timer_periods SET ends=min(ends,?) WHERE timer_id=? AND ends>?',(now,timer_id,now))
         elif action=='pause' and row[5]=='running':
             db.execute("UPDATE timers SET remaining=?,deadline=NULL,state='paused' WHERE id=?",(remaining_timer(row,now),timer_id))
+            db.execute('''UPDATE timer_periods SET ends=min(ends,?) WHERE id=(
+                SELECT id FROM timer_periods WHERE timer_id=? ORDER BY id DESC LIMIT 1)''',(now,timer_id))
         elif action=='start' and row[5]!='running':
-            remaining=row[2] if row[5]=='done' or row[3]<=0 else row[3]
+            fresh_run = row[5] in ('done','stopped') or row[3]<=0
+            remaining=row[2] if fresh_run else row[3]
+            if fresh_run:
+                # Starting a completed timer begins a new statistics session.
+                db.execute('DELETE FROM timer_periods WHERE timer_id=?',(timer_id,))
+                db.execute('DELETE FROM timer_usage WHERE timer_id=?',(timer_id,))
             db.execute("UPDATE timers SET remaining=?,deadline=?,state='running' WHERE id=?",(remaining,now+remaining,timer_id))
+            db.execute('INSERT INTO timer_periods(timer_id,started,ends) VALUES(?,?,?)',
+                       (timer_id,now,now+remaining))
 
 def finish_timers(now=None):
     now=time.time() if now is None else now
@@ -116,6 +186,103 @@ def account_sample(db, last, mono, previous, now, current_mono, app):
         db.execute('INSERT INTO usage VALUES(?,?,0,1) ON CONFLICT(day,app) DO UPDATE SET switches=switches+1', (str(D.datetime.fromtimestamp(now).date()),app))
         db.commit()
 
+def account_timer_sample(db, last, mono, previous, now, current_mono, app):
+    """Independently account active app seconds inside each timer interval.
+
+    This uses the same suspend/clock-jump protection as account_sample.
+    Periods can be stopped between ticks, so the overlap is always clipped
+    to the timer's actual start/pause/completion timestamps.
+    """
+    elapsed, monotonic_elapsed = now-last, current_mono-mono
+    valid = 0 < elapsed <= 5 and 0 < monotonic_elapsed <= 5 and abs(elapsed-monotonic_elapsed) < 0.25
+    if not app or now <= last:
+        return
+    periods = db.execute('''SELECT id,timer_id,started,ends,seen
+        FROM timer_periods WHERE started<? AND ends>? ORDER BY id''',
+        (now,last)).fetchall()
+    for period_id,timer_id,started,ends,seen in periods:
+        overlap=max(0, min(now,ends)-max(last,started))
+        charged=overlap if valid and previous==app else 0
+        # A session counts the initial app entry, even when the app was
+        # already open before the timer began. A switch counts as an entry
+        # but must not charge the interval to the wrong application.
+        entering = started <= now < ends and (not seen or previous!=app or not valid)
+        switches=int(bool(entering or (charged and not seen)))
+        if not charged and not switches:
+            continue
+        db.execute('''INSERT INTO timer_usage(timer_id,app,seconds,switches)
+            VALUES(?,?,?,?) ON CONFLICT(timer_id,app) DO UPDATE SET
+            seconds=seconds+excluded.seconds,
+            switches=switches+excluded.switches''',
+            (timer_id,app,charged,switches))
+        if not seen:
+            db.execute('UPDATE timer_periods SET seen=1 WHERE id=?',(period_id,))
+    db.commit()
+
+
+def tracking_state(cfg, app, idle_seconds, locked, media_playing=False):
+    """Return a reason as well as the app so idle never looks like a failure."""
+    if cfg['paused']: return None,'paused'
+    if locked: return None,'locked'
+    if not app: return None,'no-window'
+    if cfg['idle_mode']=='foreground': return app,'foreground'
+    if idle_seconds<cfg['idle_seconds']: return app,'active'
+    if cfg['idle_mode']=='media' and media_playing: return app,'media'
+    return None,'idle'
+
+def player_matches(app, identifiers):
+    import re
+    def tokens(value): return set(re.findall(r'[a-z0-9]+',value.casefold()))
+    # Compare complete application identifiers, never a window/media title.
+    app_tokens=tokens(app)-{'org','com','desktop','mozilla'}
+    return bool(app_tokens) and any(app_tokens <= tokens(value) for value in identifiers)
+
+class MediaActivity:
+    """Read only MPRIS playback state asynchronously; never read media titles."""
+    def __init__(self, bus, Gio, GLib):
+        self.bus,self.Gio,self.GLib=bus,Gio,GLib
+        self.players={};self.pending=set();self.list_pending=False
+    def refresh(self):
+        if self.list_pending: return True
+        self.list_pending=True
+        def listed(bus,result):
+            self.list_pending=False
+            try: names=bus.call_finish(result).unpack()[0]
+            except self.GLib.Error:
+                self.players.clear();return
+            names={n for n in names if n.startswith('org.mpris.MediaPlayer2.')}
+            self.players={n:p for n,p in self.players.items() if n in names}
+            for name in names:
+                if name in self.pending: continue
+                self.pending.add(name)
+                self.query(name)
+        self.bus.call('org.freedesktop.DBus','/org/freedesktop/DBus','org.freedesktop.DBus','ListNames',
+            None,None,self.Gio.DBusCallFlags.NONE,750,None,listed)
+        return True
+    def query(self,name):
+        identifiers=[name.split('.')[3]]
+        def identity(bus,result):
+            try:
+                props=bus.call_finish(result).unpack()[0]
+                identifiers.extend(str(props[k]) for k in ('Identity','DesktopEntry') if k in props)
+            except self.GLib.Error: pass
+            self.bus.call(name,'/org/mpris/MediaPlayer2','org.freedesktop.DBus.Properties','Get',
+                self.GLib.Variant('(ss)',('org.mpris.MediaPlayer2.Player','PlaybackStatus')),None,
+                self.Gio.DBusCallFlags.NO_AUTO_START,750,None,playback)
+        def playback(bus,result):
+            self.pending.discard(name)
+            try:
+                props=bus.call_finish(result).unpack()[0]
+                self.players[name]=(props=='Playing',time.monotonic(),identifiers)
+            except self.GLib.Error: self.players.pop(name,None)
+        self.bus.call(name,'/org/mpris/MediaPlayer2','org.freedesktop.DBus.Properties','GetAll',
+            self.GLib.Variant('(s)',('org.mpris.MediaPlayer2',)),None,
+            self.Gio.DBusCallFlags.NO_AUTO_START,750,None,identity)
+    def playing(self,*apps):
+        now=time.monotonic()
+        return any(playing and 0<=now-stamp<5 and any(app and player_matches(app,ids) for app in apps)
+                   for playing,stamp,ids in self.players.values())
+
 
 def daemon():
     lock = open(DATA/'daemon.lock','w')
@@ -130,6 +297,8 @@ def daemon():
         if not saver.get_name_owner(): return False
         try: return saver.call_sync('GetActive',None,Gio.DBusCallFlags.NONE,500,None).unpack()[0]
         except GLib.Error: return True  # Do not account time when lock state is unknown.
+    media=MediaActivity(Gio.bus_get_sync(Gio.BusType.SESSION,None),Gio,GLib)
+    media.refresh();GLib.timeout_add_seconds(2,media.refresh)
     last = time.time(); mono = time.monotonic(); previous = None
     def tick():
         nonlocal last, mono, previous
@@ -142,47 +311,80 @@ def daemon():
         app = window.get_class_group_name() if window else None
         if window and window.get_window_type() in (Wnck.WindowType.DESKTOP,Wnck.WindowType.DOCK): app = None
         idle_now=idle.seconds()
-        if cfg['paused'] or locked() or idle_now >= 60: app = None
+        app,reason=tracking_state(cfg,app,idle_now,locked(),media.playing(app,window.get_class_instance_name() if window else None))
         account_sample(db,last,mono,previous,now,m,app)
+        account_timer_sample(db,last,mono,previous,now,m,app)
         previous, last, mono = app, now, m
-        snapshot={'time':now,'app':app,'paused':cfg['paused']}
+        snapshot={'time':now,'app':app,'paused':cfg['paused'],'reason':reason}
         temp=DATA/'current.tmp'; temp.write_text(json.dumps(snapshot)); temp.replace(DATA/'current.json')
         (DATA/'heartbeat').write_text(str(now))
         return True
     tick(); GLib.timeout_add_seconds(1,tick); GLib.MainLoop().run()
 
 def panel():
-    cfg=settings(); data=rows(); total=sum(r[1] for r in data)
+    cfg=dict(DISPLAY_DEFAULTS,**settings()); data=rows(); total=sum(r[1] for r in data)
     distracted=sum(r[1] for r in data if r[0] in cfg['distracting'])
-    try: running=0 <= time.time()-float((DATA/'heartbeat').read_text())<10
+    now=time.time()
+    try: running=0 <= now-float((DATA/'heartbeat').read_text())<10
     except (OSError,ValueError): running=False
     try:
         current=json.loads((DATA/'current.json').read_text())
-        app=current.get('app') if 0 <= time.time()-current.get('time',0) < 5 else None
-    except (OSError,ValueError,AttributeError,TypeError): app=None
-    heading=app or 'Activity'
+        app=current.get('app') if isinstance(current.get('app'),str) and 0 <= now-current.get('time',0) < 5 else None
+    except (OSError,ValueError,AttributeError,TypeError): app=None;current={}
     app_seconds=next((seconds for name,seconds,_ in data if name==app),0)
-    label='Offline' if not running else 'Paused' if cfg['paused'] else duration(app_seconds) if app else 'Idle'
     tip=f'Current app: {app or "None"}\nApp today: {duration(app_seconds)}\nTotal today: {duration(total)}\nDistracted: {duration(distracted)}\n'+'\n'.join(f'{a}: {duration(s)}' for a,s,_ in data[:8])
-    active=[r for r in timers() if r[5]=='running']
+    all_timers=timers()
+    active=[r for r in all_timers if r[5]=='running'] or [r for r in all_timers if r[5]=='paused']
     if active:
-        tip+='\n\nTimers\n'+'\n'.join(f'{r[1]}: {duration(math.ceil(remaining_timer(r)))}' for r in active)
-    if len(heading)>18: heading=heading[:17]+'…'
+        # Show one running timer without hiding the currently used app.
+        # Other simultaneous timers are available in the tooltip and window.
+        timer=active[0]
+        session=timer_usage_rows(timer[0])
+        app_session=next((seconds for name,seconds,_ in session if name==app),0)
+        session_total=sum(seconds for _,seconds,_ in session)
+        tip += f'\n\nSession ({timer[5]}): {timer[1]}\nRemaining: {duration(math.ceil(remaining_timer(timer,now)))}'
+        tip += f'\nApp in session: {duration(app_session)}\nAll apps in session: {duration(session_total)}'
+        if session:
+            tip += '\nSession apps\n'+'\n'.join(f'{a}: {duration(s)}' for a,s,_ in session[:8])
+        if len(active)>1:
+            tip += '\n\nOther timers\n'+'\n'.join(
+                f'{r[1]}: {duration(math.ceil(remaining_timer(r,now)))}' for r in active[1:])
+    # Keep complete names and both session/day counters in the hover details.
+    def clipped(value):
+        limit=cfg['name_length']
+        return value if len(value)<=limit else value[:limit-1]+'…'
+    clock=short_duration if cfg['compact'] else duration
+    parts={
+        'timer': (('Ⅱ ' if active[0][5]=='paused' else '')+clipped(active[0][1])+' '+clock(math.ceil(remaining_timer(active[0],now)))) if active else '',
+        'app': ((clipped(app)+' '+clock(app_seconds)) if app else 'Idle') if running and not cfg['paused'] else ('Paused' if running else 'Offline'),
+        'daily': 'Today '+clock(total),
+        'distracted': 'Distracted '+clock(distracted),
+    }
+    if active and app and running and not cfg['paused']:
+        parts['app']=clipped(app)+' '+clock(app_session)
+        if not cfg['compact']: parts['app']+=' / '+duration(app_seconds)
+    label=' · '.join(parts[k] for k in cfg['panel_order'].split(',') if cfg['show_'+k] and parts[k]) or 'Activity'
+    text=f'<span font_desc="{html.escape(cfg["panel_font"],quote=True)}" foreground="#bfc5ce">{html.escape(label)}</span>'
+    reasons={'idle':'No input; no playing media in the foreground app','locked':'Screen locked','media':'Counting foreground media playback','foreground':'Counting focused app without idle detection','no-window':'No application focused','active':'Input activity','paused':'Tracking paused'}
+    tip=reasons.get(current.get('reason'),'')+'\n'+tip
+    tip=('Collector offline' if not running else 'Tracking paused' if cfg['paused'] else 'Tracking idle' if not app else 'Tracking active')+'\n'+tip+'\n\nClick to open activity and timers.'
     command=shlex.quote(str(Path.home()/'.local/bin/activity-tracker'))+' --window'
-    print(f'<txt><span font_desc="Inter Medium 10" foreground="#bfc5ce">  {html.escape(heading)}  </span><span font_desc="JetBrains Mono Medium 10" foreground="#e0ded8">{html.escape(label):>8}  </span></txt><tool>{html.escape(tip)}</tool><txtclick>{html.escape(command)}</txtclick>')
+    print(f'<txt>{text}</txt><tool>{html.escape(tip)}</tool><txtclick>{html.escape(command)}</txtclick>')
 
-def window():
+def build_window(application):
     import gi
     gi.require_version('Gtk','3.0')
-    from gi.repository import Gtk, GLib
-    win=Gtk.Window(title='Activity Tracker'); win.set_default_size(820,600)
+    from gi.repository import Gtk, GLib, Pango
+    win=Gtk.ApplicationWindow(application=application,title='Activity Tracker'); win.set_default_size(660,580)
+    sources=[]
+    win.connect('destroy',lambda *_:[GLib.source_remove(source) for source in sources])
     win.set_icon_name('preferences-system-time')
-    box=Gtk.Box(orientation=Gtk.Orientation.VERTICAL,spacing=16,margin=22); win.add(box)
+    box=Gtk.Box(orientation=Gtk.Orientation.VERTICAL,spacing=8,margin=12); win.add(box);outer=box
     title=Gtk.Label(xalign=0); title.set_markup('<span size="x-large" weight="bold">Activity Tracker</span>'); box.pack_start(title,False,False,0)
     tabs=Gtk.Notebook(); box.pack_start(tabs,True,True,0)
-    activity=Gtk.Box(orientation=Gtk.Orientation.VERTICAL,spacing=16,margin=16)
+    activity=Gtk.Box(orientation=Gtk.Orientation.VERTICAL,spacing=8,margin=10)
     tabs.append_page(activity,Gtk.Label(label='Activity'))
-    timer_box=Gtk.Box(orientation=Gtk.Orientation.VERTICAL,spacing=12,margin=16)
+    timer_box=Gtk.Box(orientation=Gtk.Orientation.VERTICAL,spacing=6,margin=10)
     tabs.append_page(timer_box,Gtk.Label(label='Timers'))
     entry_row=Gtk.Box(spacing=10); timer_box.pack_start(entry_row,False,False,0)
     name_entry=Gtk.Entry(); name_entry.set_placeholder_text('Timer name, e.g. Study'); name_entry.set_max_length(60)
@@ -196,14 +398,70 @@ def window():
         button.connect('clicked',lambda _,n=caption,m=mins: create_timer(n,m))
         presets.pack_start(button,False,False,0)
     timer_store=Gtk.ListStore(int,str,str,str)
-    timer_tree=Gtk.TreeView(model=timer_store)
+    timer_tree=Gtk.TreeView(model=timer_store);timer_tree.set_tooltip_column(1)
     for i,caption in [(1,'Timer'),(2,'Remaining'),(3,'Status')]:
-        renderer=Gtk.CellRendererText(); renderer.set_property('ypad',10); renderer.set_property('xpad',12)
-        if i==2: renderer.set_property('font','JetBrains Mono 11')
-        column=Gtk.TreeViewColumn(caption,renderer,text=i); column.set_expand(True); timer_tree.append_column(column)
-    timer_scroll=Gtk.ScrolledWindow(); timer_scroll.add(timer_tree); timer_box.pack_start(timer_scroll,True,True,0)
-    actions=Gtk.Box(spacing=8); timer_box.pack_start(actions,False,False,0)
+        renderer=Gtk.CellRendererText(); renderer.set_property('ypad',4); renderer.set_property('xpad',12)
+        if i==1: renderer.set_property('ellipsize',Pango.EllipsizeMode.END);renderer.set_property('width-chars',18)
+        if i==2: renderer.set_property('font','Monospace 10')
+        column=Gtk.TreeViewColumn(caption,renderer,text=i); column.set_expand(i==1);column.set_resizable(True); timer_tree.append_column(column)
+    timer_scroll=Gtk.ScrolledWindow(); timer_scroll.add(timer_tree)
+    timer_scroll.set_min_content_height(90)
+    timer_box.pack_start(timer_scroll,True,True,0)
+    action_buttons={}
+    actions=Gtk.Box(spacing=6); timer_box.pack_start(actions,False,False,0)
     timer_status=Gtk.Label(xalign=0); timer_box.pack_start(timer_status,False,False,0)
+    session_heading=Gtk.Label(xalign=0)
+    session_heading.set_markup('<b>Application time inside selected timer</b>')
+    timer_box.pack_start(session_heading,False,False,0)
+    session_summary=Gtk.Label(xalign=0)
+    session_summary.set_ellipsize(Pango.EllipsizeMode.END);session_summary.set_max_width_chars(65)
+    timer_box.pack_start(session_summary,False,False,0)
+    session_store=Gtk.ListStore(str,str,int,float);session_store.set_sort_column_id(3,Gtk.SortType.DESCENDING)
+    session_tree=Gtk.TreeView(model=session_store);session_tree.set_tooltip_column(0)
+    for i,caption in enumerate(('Application','Time in timer','Visits')):
+        renderer=Gtk.CellRendererText(); renderer.set_property('ypad',4); renderer.set_property('xpad',12)
+        if i==0: renderer.set_property('ellipsize',Pango.EllipsizeMode.END);renderer.set_property('width-chars',18)
+        if i==1: renderer.set_property('font','Monospace 10')
+        column=Gtk.TreeViewColumn(caption,renderer,text=i)
+        column.set_expand(i==0);column.set_sort_column_id(3 if i==1 else i)
+        session_tree.append_column(column)
+    session_scroll=Gtk.ScrolledWindow(); session_scroll.set_min_content_height(90)
+    session_scroll.add(session_tree); timer_box.pack_start(session_scroll,True,True,0)
+    def refresh_timer_usage(*_):
+        model,it=timer_tree.get_selection().get_selected()
+        if it is None:
+            for button in action_buttons.values(): button.set_sensitive(False)
+            session_summary.set_text('Select a timer above to see application usage in its session.')
+            session_store.clear()
+            return True
+        timer_id=model[it][0]
+        selected=next((r for r in timers() if r[0]==timer_id),None)
+        if selected is None:
+            for button in action_buttons.values(): button.set_sensitive(False)
+            session_summary.set_text('Timer no longer exists.')
+            session_store.clear()
+            return True
+        for action,button in action_buttons.items():
+            button.set_sensitive(action in ('reset','delete') or (action=='start' and selected[5]!='running') or (action=='pause' and selected[5]=='running') or (action=='stop' and selected[5] in ('running','paused')))
+        if 'start' in action_buttons: action_buttons['start'].set_label('Resume' if selected[5]=='paused' else 'Restart' if selected[5] in ('done','stopped') else 'Start')
+        data=timer_usage_rows(timer_id)
+        incoming={app:(app,duration(seconds),switches,float(seconds)) for app,seconds,switches in data}
+        for row in list(session_store):
+            if row[0] not in incoming: session_store.remove(row.iter)
+        existing={row[0]:row.iter for row in session_store}
+        for app,values in incoming.items():
+            if app in existing:
+                for col,value in enumerate(values): session_store.set_value(existing[app],col,value)
+            else:
+                session_store.append(values)
+        total=sum(seconds for _,seconds,_ in data)
+        session_summary.set_text(
+            f'{selected[1]}  •  {selected[5].title()}  •  Remaining: '
+            f'{duration(math.ceil(remaining_timer(selected)))}  •  '
+            f'Active app time in this session: {duration(total)}')
+        session_summary.set_tooltip_text(session_summary.get_text())
+        return True
+    timer_tree.get_selection().connect('changed',refresh_timer_usage)
     def refresh_timers():
         data=timers(); incoming={r[0]:r for r in data}
         for row in list(timer_store):
@@ -214,44 +472,124 @@ def window():
             if r[0] in existing:
                 for col,value in enumerate(values): timer_store.set_value(existing[r[0]],col,value)
             else: timer_store.append(values)
+        refresh_timer_usage()
         return True
     def create_timer(name,mins):
-        try: add_timer(name,int(mins)*60); timer_status.set_text('Timer saved. Select it and press Start / Resume.'); refresh_timers()
+        try:
+            tid=add_timer(name,int(mins)*60);refresh_timers()
+            for row in timer_store:
+                if row[0]==tid: timer_tree.get_selection().select_iter(row.iter);timer_tree.scroll_to_cell(row.path);break
+            name_entry.set_text('');timer_status.set_text('Timer created. Press Start when ready.')
         except ValueError as exc: timer_status.set_text(str(exc))
     add.connect('clicked',lambda _:create_timer(name_entry.get_text(),minutes.get_value_as_int()))
+    name_entry.connect('activate',lambda _:create_timer(name_entry.get_text(),minutes.get_value_as_int()))
+    def confirm(message):
+        dialog=Gtk.MessageDialog(transient_for=win,modal=True,message_type=Gtk.MessageType.QUESTION,buttons=Gtk.ButtonsType.OK_CANCEL,text=message)
+        response=dialog.run();dialog.destroy();return response==Gtk.ResponseType.OK
     def act(action):
         model,it=timer_tree.get_selection().get_selected()
         if it is None: timer_status.set_text('Select a timer first.'); return
+        selected=next((r for r in timers() if r[0]==model[it][0]),None)
+        if selected is None: refresh_timers();return
+        if action in ('reset','delete') or (action=='start' and selected[5] in ('done','stopped')):
+            if not confirm('Delete this timer and its statistics?' if action=='delete' else 'Start a new session and clear this timer’s statistics?'): return
         timer_action(model[it][0],action); refresh_timers(); timer_status.set_text('')
-    for caption,action in [('Start / Resume','start'),('Pause','pause'),('Reset','reset'),('Delete','delete')]:
-        button=Gtk.Button(label=caption); button.connect('clicked',lambda _,a=action:act(a)); actions.pack_start(button,False,False,0)
-    hint=Gtk.Label(label='Timers keep running while idle, locked or asleep.\nYou will be notified when each timer finishes.',xalign=0)
+    for caption,action in [('Start','start'),('Pause','pause'),('Stop','stop'),('Reset','reset'),('Delete','delete')]:
+        button=Gtk.Button(label=caption); button.connect('clicked',lambda _,a=action:act(a)); actions.pack_start(button,False,False,0);action_buttons[action]=button;button.set_sensitive(False)
+    hint=Gtk.Label(label='Pause resumes later · Stop keeps session statistics',xalign=0)
+    hint.set_tooltip_text('Select a timer to inspect application time. The countdown continues during sleep and while tracking is paused. Reset and restart clear only this timer’s statistics.')
+    hint.set_line_wrap(True);hint.set_max_width_chars(65)
     hint.get_style_context().add_class('dim-label'); timer_box.pack_start(hint,False,False,0)
-    refresh_timers(); GLib.timeout_add_seconds(1,refresh_timers)
+    refresh_timers(); sources.append(GLib.timeout_add_seconds(1,refresh_timers))
+    # When a user clicks the panel during a running timer, show its session.
+    active_id=next((r[0] for state in ('running','paused') for r in timers() if r[5]==state),None)
+    if active_id is not None:
+        for row in timer_store:
+            if row[0]==active_id:
+                timer_tree.get_selection().select_iter(row.iter)
+                tabs.set_current_page(1)
+                break
     box=activity
-    bar=Gtk.Box(spacing=12); box.pack_start(bar,False,False,0)
+    bar=Gtk.Box(spacing=6);outer.pack_start(bar,False,False,0);outer.reorder_child(bar,1)
     period=Gtk.ComboBoxText()
-    for title in ('Today','Last 7 days','Last 30 days'): period.append_text(title)
+    for title in ('Today','Last 7 days','Last 30 days','Specific day'): period.append_text(title)
     period.set_active(0); bar.pack_start(period,False,False,0)
+    selected_day=[D.date.today()]
+    previous_day=Gtk.Button(label='‹');previous_day.set_tooltip_text('Previous day')
+    next_day=Gtk.Button(label='›');next_day.set_tooltip_text('Next day')
+    date_button=Gtk.MenuButton(label=selected_day[0].isoformat());date_button.set_tooltip_text('Choose a date')
+    popover=Gtk.Popover.new(date_button);calendar=Gtk.Calendar();popover.add(calendar);date_button.set_popover(popover);calendar.show()
+    for control in (previous_day,date_button,next_day): bar.pack_start(control,False,False,0)
+    def choose_day(day):
+        selected_day[0]=day;date_button.set_label(day.isoformat())
+        calendar.select_month(day.month-1,day.year);calendar.select_day(day.day)
+        period.set_active(3);refresh()
+    previous_day.connect('clicked',lambda *_:choose_day((D.date.today() if period.get_active()!=3 else selected_day[0])-D.timedelta(days=1)))
+    next_day.connect('clicked',lambda *_:choose_day((D.date.today() if period.get_active()!=3 else selected_day[0])+D.timedelta(days=1)))
+    def calendar_chosen(*_):
+        year,month,day=calendar.get_date()
+        selected_day[0]=D.date(year,month+1,day);date_button.set_label(selected_day[0].isoformat())
+        period.set_active(3);refresh()
+    calendar.connect('day-selected',calendar_chosen)
+    calendar.connect('day-selected-double-click',lambda *_:popover.popdown())
     pause=Gtk.CheckButton(label='Pause tracking'); pause.set_active(settings()['paused']); bar.pack_start(pause,False,False,0)
-    summary=Gtk.Label(xalign=0); box.pack_start(summary,False,False,0)
-    store=Gtk.ListStore(str,str,int,bool)
-    tree=Gtk.TreeView(model=store)
-    tree.set_enable_search(False)
-    tree.set_headers_clickable(False)
+    summary=Gtk.Label(xalign=0);summary.set_line_wrap(True); box.pack_start(summary,False,False,0)
+    empty=Gtk.Label(label='No recorded activity for this period.',xalign=0);box.pack_start(empty,False,False,0)
+    empty.set_no_show_all(True)
+    store=Gtk.ListStore(str,str,int,bool,float);store.set_sort_column_id(4,Gtk.SortType.DESCENDING)
+    tree=Gtk.TreeView(model=store);tree.set_tooltip_column(0)
+    tree.set_enable_search(True);tree.set_search_column(0)
+    tree.set_headers_clickable(True)
     for i,title in enumerate(('Application','Time','Visits')):
-        renderer=Gtk.CellRendererText(); renderer.set_property('ypad',8); renderer.set_property('xpad',12)
-        if i == 1: renderer.set_property('font','JetBrains Mono 11')
-        column=Gtk.TreeViewColumn(title,renderer,text=i); column.set_expand(i==0); column.set_min_width(100 if i else 240)
-        tree.append_column(column)
+        renderer=Gtk.CellRendererText(); renderer.set_property('ypad',4); renderer.set_property('xpad',12)
+        if i==0: renderer.set_property('ellipsize',Pango.EllipsizeMode.END);renderer.set_property('width-chars',18)
+        if i == 1: renderer.set_property('font','Monospace 10')
+        column=Gtk.TreeViewColumn(title,renderer,text=i); column.set_expand(i==0); column.set_min_width(80 if i else 160);column.set_resizable(True)
+        column.set_sort_column_id(4 if i==1 else i);tree.append_column(column)
     toggle=Gtk.CellRendererToggle(); toggle.set_property('xpad',20); tree.append_column(Gtk.TreeViewColumn('Distracting',toggle,active=3))
     scroll=Gtk.ScrolledWindow(); scroll.add(tree); box.pack_start(scroll,True,True,0)
-    note=Gtk.Label(label='Mark apps you find distracting. Tracking stops after 60 seconds of inactivity.\nBrowsers are tracked as apps, not individual websites.',xalign=0)
+    note=Gtk.Label(label='Mark apps you find distracting. Idle rules and media playback can be configured in Settings.\nBrowsers are tracked as apps, not individual websites.',xalign=0)
     note.set_line_wrap(True); note.get_style_context().add_class('dim-label')
     box.pack_start(note,False,False,0)
+    stats=Gtk.Box(orientation=Gtk.Orientation.VERTICAL,spacing=12,margin=14)
+    stats_heading=Gtk.Label(xalign=0);stats.pack_start(stats_heading,False,False,0)
+    stats_summary=Gtk.Label(xalign=0);stats_summary.set_line_wrap(True);stats.pack_start(stats_summary,False,False,0)
+    stats_scroll=Gtk.ScrolledWindow();stats_scroll.set_policy(Gtk.PolicyType.NEVER,Gtk.PolicyType.AUTOMATIC)
+    chart=Gtk.Box(orientation=Gtk.Orientation.VERTICAL,spacing=14,margin=4);stats_scroll.add(chart);stats.pack_start(stats_scroll,True,True,0)
+    stats_empty=Gtk.Label(label='No recorded activity for this period.\nChoose another date using the controls above.',xalign=0)
+    stats_empty.set_line_wrap(True);stats_empty.set_no_show_all(True);stats.pack_start(stats_empty,True,True,0)
+    stats_note=Gtk.Label(label='Bars show each application’s share of recorded time. Hover for exact time and visits.',xalign=0)
+    stats_note.set_line_wrap(True);stats_note.get_style_context().add_class('dim-label');stats.pack_start(stats_note,False,False,0)
+    chart_rows={}
+    def update_statistics(data,caption,cfg):
+        measured=[row for row in data if row[1]>0]
+        total=sum(row[1] for row in measured)
+        distracted=sum(row[1] for row in measured if row[0] in cfg['distracting'])
+        stats_heading.set_markup('<b>'+html.escape(caption)+'</b>')
+        stats_summary.set_text(f'{duration(total)} recorded  ·  {len(measured)} applications  ·  '+(f'{distracted/total:.0%} distracting' if total else 'No time recorded'))
+        stats_empty.set_visible(not measured);stats_scroll.set_visible(bool(measured))
+        incoming={row[0] for row in measured}
+        for name in list(chart_rows):
+            if name not in incoming: chart_rows.pop(name)[0].destroy()
+        for index,(name,seconds,visits) in enumerate(measured):
+            if name not in chart_rows:
+                row=Gtk.Box(orientation=Gtk.Orientation.VERTICAL,spacing=5)
+                header=Gtk.Box(spacing=12);label=Gtk.Label(xalign=0);label.set_ellipsize(Pango.EllipsizeMode.END);label.set_max_width_chars(30)
+                value=Gtk.Label(xalign=1)
+                header.pack_start(label,True,True,0);header.pack_end(value,False,False,0)
+                progress=Gtk.ProgressBar();row.pack_start(header,False,False,0);row.pack_start(progress,False,False,0)
+                chart.pack_start(row,False,False,0);chart_rows[name]=(row,label,value,progress);row.show_all()
+            row,label,value,progress=chart_rows[name]
+            label.set_text(name);value.set_text(f'{duration(seconds)}   {seconds/total:.1%}');progress.set_fraction(seconds/total)
+            row.set_tooltip_text(f'{name}\nTime: {duration(seconds)}\nShare: {seconds/total:.2%}\nVisits: {visits}')
+            chart.reorder_child(row,index)
     def refresh(*_):
-        data=rows((1,7,30)[period.get_active()]); cfg=settings()
-        incoming={a:(a,duration(s),n,a in cfg['distracting']) for a,s,n in data}
+        index=period.get_active()
+        date_button.set_label(selected_day[0].isoformat() if index==3 else 'Choose date…')
+        data=rows(day=selected_day[0]) if index==3 else rows((1,7,30)[index]);cfg=settings()
+        caption=selected_day[0].strftime('%A, %d %B %Y') if index==3 else (D.date.today().strftime('Today · %d %B %Y') if index==0 else f'Last {(1,7,30)[index]} days · through {D.date.today().isoformat()}')
+        update_statistics(data,caption,cfg);empty.set_visible(not data)
+        incoming={a:(a,duration(s),n,a in cfg['distracting'],float(s)) for a,s,n in data}
         for row in list(store):
             if row[0] not in incoming: store.remove(row.iter)
         existing={row[0]:row.iter for row in store}
@@ -262,13 +600,14 @@ def window():
         total=sum(s for _,s,_ in data); distracted=sum(s for a,s,_ in data if a in cfg['distracting'])
         try: alive=0 <= time.time()-float((DATA/'heartbeat').read_text()) < 10
         except (OSError,ValueError): alive=False
-        state='Collector offline' if not alive else 'Paused' if cfg['paused'] else 'Tracking live'
-        summary.set_text(f'{state} • Active: {duration(total)} • Distracted: {duration(distracted)}')
+        try: reason=json.loads((DATA/'current.json').read_text()).get('reason','active')
+        except (OSError,ValueError,AttributeError): reason='active'
+        states={'idle':'Idle','locked':'Screen locked','media':'Tracking media playback','no-window':'No focused application'}
+        state='Collector offline' if not alive else 'Paused' if cfg['paused'] else states.get(reason,'Tracking live')
+        summary.set_text(f'{caption}\nRecorded: {duration(total)} · Distracted: {duration(distracted)}'+(f' · {state}' if index==0 else ''))
         return True
     def save(cfg):
-        with tempfile.NamedTemporaryFile(mode='w',dir=DATA,delete=False) as f:
-            json.dump(cfg,f,ensure_ascii=False); temp=Path(f.name)
-        temp.replace(CONFIG); refresh()
+        save_settings(cfg);refresh()
     def toggled(_,path):
         app=store[path][0]; cfg=settings()
         if app in cfg['distracting']: cfg['distracting'].remove(app)
@@ -276,8 +615,83 @@ def window():
         save(cfg)
     toggle.connect('toggled',toggled)
     pause.connect('toggled',lambda b: save(dict(settings(),paused=b.get_active())))
-    period.connect('changed',refresh); refresh(); GLib.timeout_add_seconds(1,refresh)
-    win.connect('destroy',Gtk.main_quit); win.show_all(); Gtk.main()
+    period.connect('changed',refresh); refresh(); sources.append(GLib.timeout_add_seconds(1,refresh))
+    prefs=Gtk.Box(orientation=Gtk.Orientation.VERTICAL,spacing=8,margin=12)
+    prefs_scroll=Gtk.ScrolledWindow();prefs_scroll.add(prefs);tabs.append_page(prefs_scroll,Gtk.Label(label='Panel'))
+    cfg=settings()
+    prefs.pack_start(Gtk.Label(label='Panel elements — drag rows or use the arrows',xalign=0),False,False,0)
+    model=Gtk.ListStore(str,str,bool)
+    names=dict(timer='Active timer',app='Current application',daily='Total active time today',distracted='Distracted time today')
+    for key in cfg['panel_order'].split(','): model.append((key,names[key],cfg['show_'+key]))
+    view=Gtk.TreeView(model=model);view.set_reorderable(True)
+    toggle_display=Gtk.CellRendererToggle()
+    toggle_display.connect('toggled',lambda _,path: model.set_value(model.get_iter(path),2,not model[path][2]))
+    view.append_column(Gtk.TreeViewColumn('Show',toggle_display,active=2))
+    view.append_column(Gtk.TreeViewColumn('Element',Gtk.CellRendererText(),text=1));prefs.pack_start(view,False,False,0)
+    arrows=Gtk.Box(spacing=6)
+    def move(_,offset):
+        store,it=view.get_selection().get_selected()
+        if it is None: return
+        target=store.get_path(it).get_indices()[0]+offset
+        if 0<=target<len(store): store.swap(it,store.get_iter(Gtk.TreePath.new_from_indices([target])))
+    for caption,offset in [('Move up',-1),('Move down',1)]:
+        button=Gtk.Button(label=caption);button.connect('clicked',move,offset);arrows.pack_start(button,False,False,0)
+    prefs.pack_start(arrows,False,False,0)
+    compact=Gtk.CheckButton(label='Compact counters (full details on hover)');compact.set_active(cfg['compact']);prefs.pack_start(compact,False,False,0)
+    row=Gtk.Box(spacing=12);row.pack_start(Gtk.Label(label='Panel font and size',xalign=0),True,True,0)
+    font=Gtk.FontButton();font.set_font(cfg['panel_font']);row.pack_end(font,False,False,0);prefs.pack_start(row,False,False,0)
+    row=Gtk.Box(spacing=12);row.pack_start(Gtk.Label(label='Maximum name length',xalign=0),True,True,0)
+    length=Gtk.SpinButton.new_with_range(4,30,1);length.set_value(cfg['name_length']);row.pack_end(length,False,False,0);prefs.pack_start(row,False,False,0)
+    panel_prefs=prefs
+    prefs=Gtk.Box(orientation=Gtk.Orientation.VERTICAL,spacing=12,margin=12)
+    scroll=Gtk.ScrolledWindow();scroll.add(prefs);tabs.append_page(scroll,Gtk.Label(label='Tracking'))
+    row=Gtk.Box(spacing=12);row.pack_start(Gtk.Label(label='Idle detection',xalign=0),True,True,0)
+    idle_mode=Gtk.ComboBoxText()
+    for key,caption in [('media','Count foreground media playback'),('input','Only keyboard / mouse activity'),('foreground','Always count the focused app')]: idle_mode.append(key,caption)
+    idle_mode.set_active_id(cfg['idle_mode']);row.pack_end(idle_mode,False,False,0);prefs.pack_start(row,False,False,0)
+    row=Gtk.Box(spacing=12);row.pack_start(Gtk.Label(label='Idle timeout (seconds)',xalign=0),True,True,0)
+    idle_limit=Gtk.SpinButton.new_with_range(30,3600,30);idle_limit.set_value(cfg['idle_seconds']);row.pack_end(idle_limit,False,False,0);prefs.pack_start(row,False,False,0)
+    idle_limit.set_sensitive(cfg['idle_mode']!='foreground')
+    idle_mode.connect('changed',lambda *_:idle_limit.set_sensitive(idle_mode.get_active_id()!='foreground'))
+    media_hint=Gtk.Label(label='Media mode counts playback only in the focused app. Screen lock and manual pause always stop tracking. If a player does not report playback, use the focused-app mode; it also counts reading without input.',xalign=0)
+    media_hint.set_line_wrap(True);media_hint.set_max_width_chars(65);prefs.pack_start(media_hint,False,False,0)
+    prefs=panel_prefs
+    hint=Gtk.Label(label='During a timer, the panel shows app time in that session.\nHover for full names, daily totals and all running timers.',xalign=0);hint.set_line_wrap(True);prefs.pack_start(hint,False,False,0)
+    feedback=Gtk.Label(xalign=0);feedback.set_line_wrap(True)
+    apply=Gtk.Button(label='Apply preferences');apply.set_sensitive(False)
+    dirty=[False]
+    def changed(*_):
+        dirty[0]=True;apply.set_sensitive(True);feedback.set_text('Unsaved changes — press Apply to save.')
+    def apply_display(*_):
+        current=settings()
+        current.update({'show_'+r[0]:r[2] for r in model})
+        current.update(panel_order=','.join(r[0] for r in model),compact=compact.get_active(),panel_font=font.get_font(),name_length=length.get_value_as_int(),idle_mode=idle_mode.get_active_id(),idle_seconds=idle_limit.get_value_as_int())
+        try: save_settings(current)
+        except OSError as exc: feedback.set_text('Could not save: '+str(exc));return
+        dirty[0]=False;apply.set_sensitive(False);feedback.set_text('Saved. Panel updates within one second.')
+    for signal in ('row-changed','rows-reordered','row-inserted','row-deleted'): model.connect(signal,changed)
+    idle_mode.connect('changed',changed);idle_limit.connect('value-changed',changed)
+    compact.connect('toggled',changed);font.connect('font-set',changed);length.connect('value-changed',changed)
+    apply.connect('clicked',apply_display);outer.pack_start(apply,False,False,0);outer.pack_start(feedback,False,False,0)
+    def close_requested(*_):
+        if not dirty[0]: return False
+        dialog=Gtk.MessageDialog(transient_for=win,modal=True,message_type=Gtk.MessageType.QUESTION,buttons=Gtk.ButtonsType.NONE,text='Discard unsaved preferences?')
+        dialog.add_button('Keep editing',Gtk.ResponseType.CANCEL);dialog.add_button('Discard',Gtk.ResponseType.REJECT)
+        result=dialog.run();dialog.destroy();return result!=Gtk.ResponseType.REJECT
+    win.connect('delete-event',close_requested)
+    tabs.append_page(stats,Gtk.Label(label='Statistics'))
+    win.show_all();refresh()
+    if active_id is not None: tabs.set_current_page(1)
+
+def window():
+    import gi
+    gi.require_version('Gtk','3.0')
+    from gi.repository import Gtk
+    app=Gtk.Application(application_id='local.user.ActivityTracker')
+    def activate(app):
+        if app.get_active_window(): app.get_active_window().present()
+        else: build_window(app)
+    app.connect('activate',activate);app.run([])
 
 if __name__=='__main__':
     if '--daemon' in sys.argv: daemon()

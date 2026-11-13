@@ -73,17 +73,92 @@ class TimerTests(unittest.TestCase):
   m['timer_action'](b[0],'delete',120)
   self.assertEqual(len(m['timers']()),1)
 
+class TimerUsageTests(unittest.TestCase):
+ def setUp(self):
+  from unittest.mock import patch
+  self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
+  p=patch.dict(m['database'].__globals__,DATA=Path(self.tmp.name))
+  p.start();self.addCleanup(p.stop)
+ def sample(self,start,previous,end,app,mono_start=None,mono_end=None):
+  with m['contextlib'].closing(m['database']()) as db:
+   a=start if mono_start is None else mono_start
+   b=end if mono_end is None else mono_end
+   m['account_sample'](db,start,a,previous,end,b,app)
+   m['account_timer_sample'](db,start,a,previous,end,b,app)
+ def test_timer_session_pause_resume_and_reset(self):
+  m['add_timer']('Studying',60); tid=m['timers']()[0][0]
+  m['timer_action'](tid,'start',100.25)
+  self.sample(100,'Editor',101,'Editor')
+  self.sample(101,'Editor',102,'Editor')
+  m['timer_action'](tid,'pause',102.5)
+  self.sample(102,'Editor',103,'Editor')
+  self.sample(103,'Editor',104,'Editor')
+  self.assertEqual(m['timer_usage_rows'](tid),[('Editor',2.25,1)])
+  m['timer_action'](tid,'start',200)
+  self.sample(200,'Editor',201,'Editor')
+  self.assertEqual(m['timer_usage_rows'](tid),[('Editor',3.25,2)])
+  m['timer_action'](tid,'reset',202)
+  self.assertEqual(m['timer_usage_rows'](tid),[])
+  # The global data must not be reset together with the timer session.
+  with m['contextlib'].closing(m['database']()) as db:
+   self.assertEqual(db.execute('SELECT SUM(seconds) FROM usage').fetchone()[0],5)
+ def test_switch_no_wrong_app_charge_idle_suspend_and_completion(self):
+  m['add_timer']('Study',2);tid=m['timers']()[0][0]
+  m['timer_action'](tid,'start',100)
+  self.sample(100,'Terminal',101,'Browser')
+  self.assertEqual(m['timer_usage_rows'](tid),[('Browser',0,1)])
+  self.sample(101,'Browser',102,'Browser')
+  m['finish_timers'](103)
+  self.sample(102,'Browser',103,'Browser')
+  self.sample(103,'Browser',104,None)
+  self.assertEqual(m['timer_usage_rows'](tid),[('Browser',1,1)])
+  m['timer_action'](tid,'start',110)
+  self.assertEqual(m['timer_usage_rows'](tid),[])
+  # A monotonic/wall-clock mismatch must never accrue timer seconds.
+  self.sample(110,'Browser',112,'Browser',110,111)
+  self.assertEqual(sum(s for _,s,_ in m['timer_usage_rows'](tid)),0)
+ def test_two_timers_are_independent_and_deleting_cascades(self):
+  m['add_timer']('Study',60);m['add_timer']('Break',60)
+  a,b=[r[0] for r in m['timers']()]
+  m['timer_action'](a,'start',100)
+  self.sample(100,'Editor',101,'Editor')
+  m['timer_action'](b,'start',101)
+  self.sample(101,'Editor',102,'Editor')
+  m['timer_action'](a,'pause',102.5)
+  self.sample(102,'Editor',103,'Editor')
+  self.assertEqual(m['timer_usage_rows'](a),[('Editor',2.5,1)])
+  self.assertEqual(m['timer_usage_rows'](b),[('Editor',2,1)])
+  m['timer_action'](a,'delete',104)
+  self.assertEqual(m['timer_usage_rows'](a),[])
+  self.assertEqual(m['timer_usage_rows'](b),[('Editor',2,1)])
+  with m['contextlib'].closing(m['database']()) as db:
+   self.assertEqual(db.execute('SELECT COUNT(*) FROM timer_periods WHERE timer_id=?',(a,)).fetchone()[0],0)
+ def test_legacy_database_upgrade_keeps_history_and_running_timer(self):
+  path=Path(self.tmp.name)/'activity.sqlite3'
+  with sqlite3.connect(path) as db:
+   db.execute('CREATE TABLE usage(day TEXT,app TEXT,seconds REAL,switches INTEGER,PRIMARY KEY(day,app))')
+   db.execute('INSERT INTO usage VALUES(?,?,?,?)',('2026-11-13','Editor',300,2))
+   db.execute("CREATE TABLE timers(id INTEGER PRIMARY KEY,name TEXT,seconds INTEGER,remaining REAL,deadline REAL,state TEXT)")
+   db.execute('INSERT INTO timers VALUES(1,?,?,?,?,?)',('Study',60,40,140,'running'))
+  with m['contextlib'].closing(m['database']()) as db:
+   self.assertEqual(db.execute('SELECT seconds FROM usage').fetchone()[0],300)
+   self.assertEqual(db.execute('SELECT started,ends FROM timer_periods').fetchone(),(100,140))
+  self.sample(110,'Editor',111,'Editor')
+  self.assertEqual(m['timer_usage_rows'](1),[('Editor',1,1)])
+
 class CurrentAppPanelTests(unittest.TestCase):
- def test_panel_uses_current_app_even_with_running_timer(self):
+ def test_panel_shows_timer_and_current_app_with_session_and_daily_time(self):
   from unittest.mock import patch
   import time,json,contextlib,io
   with tempfile.TemporaryDirectory() as td:
    data=Path(td); now=time.time()
    (data/'heartbeat').write_text(str(now))
    (data/'current.json').write_text(json.dumps({'time':now,'app':'Editor'}))
-   fake={'DATA':data,'rows':lambda:[('Browser',800,1),('Editor',42,2)],'settings':lambda:{'paused':False,'distracting':[]},'timers':lambda:[(1,'Study',1500,1500,now+500,'running')]}
+   fake={'DATA':data,'rows':lambda:[('Browser',800,1),('Editor',42,2)],'settings':lambda:{'paused':False,'distracting':[]},'timers':lambda:[(1,'Study',1500,1500,now+500,'running')], 'timer_usage_rows':lambda _: [('Editor',12,1)]}
    with patch.dict(m['panel'].__globals__,fake),contextlib.redirect_stdout(io.StringIO()) as out: m['panel']()
    label=out.getvalue().split('</txt>')[0]
-   self.assertIn('Editor',label);self.assertIn('00:00:42',label);self.assertNotIn('Study',label)
+   self.assertIn('Study',label);self.assertIn('Editor',label)
+   self.assertIn('00:12',label);self.assertNotIn('00:00:42',label)
+   self.assertIn('App today: 00:00:42',out.getvalue());self.assertIn('App in session: 00:00:12',out.getvalue())
 
 if __name__=='__main__': unittest.main()

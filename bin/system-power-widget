@@ -1,6 +1,6 @@
 #!/usr/bin/python3
 """Low-overhead XFCE genmon monitor; all measurements are read-only."""
-import os, sys, json, time, html, shutil, statistics
+import os, sys, json, time, html, shutil, statistics, tempfile
 from pathlib import Path
 os.umask(0o077)
 BAT = Path('/sys/class/power_supply/BAT0')
@@ -11,7 +11,7 @@ if RUNTIME.stat().st_uid != os.getuid():
 CACHE = RUNTIME / (f'dashboard-{os.getpid()}.json' if '--window' in sys.argv else 'panel.json')
 
 CONFIG = Path.home()/'.config/system-power-widget/settings.json'
-DEFAULTS = dict(interval=5, panel_interval=5, warning_temperature=80, warning_memory=90, warning_battery=20, warning_color="#df8585", compact=False, metric_order="power,cpu,memory,temperature,network,runtime,swap,disk", show_cpu=True, show_memory=True, show_temperature=True, show_network=False, show_power=True, show_runtime=False, show_swap=False, show_disk=False, interface="auto", network_units="KiB/s", memory_units="percent", disk_path="/", average_samples=24, separator="  ·  ", accent="#bfbdb6", tooltip=True)
+DEFAULTS = dict(interval=5, panel_interval=5, warning_temperature=80, warning_memory=90, warning_battery=20, warning_color="#df8585", compact=True, panel_font="Monospace 9", metric_order="power,cpu,memory,temperature,network,runtime,swap,disk", show_cpu=True, show_memory=True, show_temperature=True, show_network=False, show_power=True, show_runtime=False, show_swap=False, show_disk=False, interface="auto", network_units="KiB/s", memory_units="percent", disk_path="/", average_samples=24, separator="  ·  ", accent="#bfbdb6", tooltip=True)
 def settings():
     try: stored=json.loads(CONFIG.read_text())
     except (OSError,ValueError): stored={}
@@ -26,7 +26,21 @@ def settings():
     import re
     for key in ('accent','warning_color'):
         if not re.fullmatch(r'#[0-9a-fA-F]{6}',cfg[key]): cfg[key]=DEFAULTS[key]
+    order = [v.strip() for v in cfg['metric_order'].split(',')]
+    known = DEFAULTS['metric_order'].split(',')
+    cfg['metric_order'] = ','.join(dict.fromkeys([v for v in order if v in known] + known))
+    for key, options in [('memory_units', ('percent','GiB')), ('network_units', ('KiB/s','MiB/s','Mbit/s'))]:
+        if cfg[key] not in options: cfg[key] = DEFAULTS[key]
+    if not cfg['panel_font'].strip(): cfg['panel_font'] = DEFAULTS['panel_font']
     return cfg
+
+def save_settings(cfg):
+    CONFIG.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(mode='w', dir=CONFIG.parent, delete=False) as f:
+        temp = Path(f.name)
+        json.dump(cfg, f, indent=2)
+    try: temp.replace(CONFIG)
+    finally: temp.unlink(missing_ok=True)
 
 def read(p, default='—'):
     try: return Path(p).read_text().strip()
@@ -84,8 +98,29 @@ def panel_metrics(cfg, *, status, ac, percent, power, busy, used, mt, swap,
         network='NET '+network,
     )
     if cfg['compact']:
-        values={k:v.replace('CPU ','C ').replace('RAM ','M ').replace('DISK ','D ').replace('SWAP ','S ').replace('ETA ','') for k,v in values.items()}
+        values.update(
+            power=f'{source:<3}{number(percent,3)}% {flow}',
+            temperature=number(cpu_temp,3)+'°',
+            network=network.replace('/s',''),
+        )
+        values={k:v.replace('CPU ','C').replace('RAM ','M').replace(' GiB','G').replace('DISK ','D').replace('SWAP ','S').replace('ETA ','') for k,v in values.items()}
     return values
+
+def warning_metrics(cfg, *, status, percent, cpu_temp, memory_percent):
+    warnings={}
+    if cpu_temp is not None and cpu_temp>=cfg['warning_temperature']:
+        warnings['temperature']=f"CPU temperature: {cpu_temp:.0f}°C ≥ {cfg['warning_temperature']}°C"
+    if memory_percent>=cfg['warning_memory']:
+        warnings['memory']=f"Memory usage: {memory_percent:.0f}% ≥ {cfg['warning_memory']}%"
+    if status=='Discharging' and percent is not None and percent<=cfg['warning_battery']:
+        warnings['power']=f"Low battery: {percent:.0f}% ≤ {cfg['warning_battery']}%"
+    return warnings
+
+def metric_markup(fields, warnings, cfg, separator):
+    return html.escape(separator).join(
+        f'<span foreground="{cfg["warning_color"]}">{html.escape(value)}</span>'
+        if key in warnings else html.escape(value) for key,value in fields)
+
 
 def sample(panel_mode=False):
     cfg=settings()
@@ -165,7 +200,7 @@ def sample(panel_mode=False):
         flow=f'Battery flow: {fmt(power," W")}'
         label=f'{"AC" if ac else "BAT"} {fmt(percent,"%",0)}'
     rows=[
-      ('Power source',f'{"Adapter connected" if ac else "Running on battery"} · {state}'),
+      ('Power source',f'{"Adapter connected" if ac else "Running on battery"} · {state} · {fmt(percent,"%",0)}'),
       ('Power flow',flow),
       ('Estimated runtime', duration(eta) if eta is not None else '— (available while discharging)'),
       ('Stored energy',f'{fmt(energy," Wh")} / {fmt(full," Wh")}'),
@@ -209,22 +244,26 @@ def sample(panel_mode=False):
     pieces=[metrics[k] for k in order if k in metrics and cfg.get('show_'+k,False)]
     if cfg['compact'] and not panel_mode:
         pieces=[v.replace('CPU ','C ').replace('RAM ','M ').replace('DISK ','D ').replace('SWAP ','S ') for v in pieces]
-    warning=(cpu_temp is not None and cpu_temp>=cfg['warning_temperature']) or used/mt*100>=cfg['warning_memory'] or (status=='Discharging' and percent is not None and percent<=cfg['warning_battery'])
-    if warning and not panel_mode: pieces.insert(0,'⚠')
-    sample.warning=warning
+    warnings=warning_metrics(cfg,status=status,percent=percent,cpu_temp=cpu_temp,memory_percent=used/mt*100)
+    sample.warning=bool(warnings);sample.warnings=warnings
     rows[15]=('Network', 'Selected: '+network+'\n\n'+'\n'.join(netrows))
     separator=(' '+cfg['separator'].strip()+' ' if cfg['separator'].strip() else ' ') if panel_mode else cfg['separator']
+    keys=[k for k in order if k in metrics and cfg.get('show_'+k,False)]
+    sample.markup=metric_markup(zip(keys,pieces),warnings,cfg,separator) or 'System'
     return separator.join(pieces) or 'System',rows,note
 
 def panel():
     label,rows,note=sample(panel_mode=True)
     tip='\n'.join(f'{k}: {v}' for k,v in rows)+'\n\n'+note+'\nClick to open System & Power.'
     cfg=settings()
-    color=cfg['warning_color'] if getattr(sample,'warning',False) else cfg['accent']
+    color=cfg['accent']
     if not settings()['tooltip']: tip='Click to open System & Power.'
+    warnings=getattr(sample,'warnings',{})
+    if warnings: tip='Alerts\n'+'\n'.join(warnings.values())+'\n\n'+tip
+    markup=getattr(sample,'markup',html.escape(label))
     warning_alpha=65535 if getattr(sample,'warning',False) else 1
-    print(f'<txt><span font_family="monospace" font_desc="JetBrains Mono Medium 10" foreground="{color}">'
-          f'<span alpha="{warning_alpha}">⚠</span> {html.escape(label)}</span></txt>'
+    print(f'<txt><span font_family="monospace" font_desc="{html.escape(cfg['panel_font'], quote=True)}" foreground="{color}">'
+          f'<span foreground="{cfg["warning_color"]}" alpha="{warning_alpha}">⚠</span> {markup}</span></txt>'
           f'<txtclick>{html.escape(str(Path.home()/".local/bin/system-power-widget"))} --window</txtclick>'
           f'<tool>{html.escape(tip)}</tool>')
 
@@ -239,15 +278,13 @@ def window():
             app.get_active_window().present();return
         cfg=settings()
         win=Gtk.ApplicationWindow(application=app,title='System & Power')
-        win.set_default_size(860,760)
+        win.set_default_size(640,560)
         win.set_icon_name('utilities-system-monitor')
-        outer=Gtk.Box(orientation=Gtk.Orientation.VERTICAL,spacing=16,margin=22)
+        outer=Gtk.Box(orientation=Gtk.Orientation.VERTICAL,spacing=8,margin=12)
         win.add(outer)
         title=Gtk.Label(xalign=0)
         title.set_markup('<span size="x-large" weight="bold">System &amp; Power</span>')
         outer.pack_start(title,False,False,0)
-        subtitle=Gtk.Label(label='SYSTEM  /  LIVE TELEMETRY',xalign=0)
-        subtitle.get_style_context().add_class('dim-label');outer.pack_start(subtitle,False,False,0)
         summary=Gtk.Label(xalign=0)
         summary.set_line_wrap(True);summary.set_max_width_chars(85)
         summary.set_margin_top(6);summary.set_margin_bottom(6)
@@ -258,12 +295,12 @@ def window():
         groups=[('Power',range(0,8)),('System',list(range(8,15))+list(range(16,21))),('Network',[15])]
         for name,indices in groups:
             scroll=Gtk.ScrolledWindow();scroll.set_policy(Gtk.PolicyType.NEVER,Gtk.PolicyType.AUTOMATIC)
-            grid=Gtk.Grid(column_spacing=26,row_spacing=14,margin=18)
+            grid=Gtk.Grid(column_spacing=16,row_spacing=8,margin=12)
             scroll.add(grid);notebook.append_page(scroll,Gtk.Label(label=name))
             for i,index in enumerate(indices):
                 k,v=rows[index]
                 key=Gtk.Label(label=k,xalign=0);key.set_valign(Gtk.Align.START);key.get_style_context().add_class('dim-label')
-                val=Gtk.Label(label=v,xalign=0);val.set_line_wrap(True);val.set_max_width_chars(55);val.set_hexpand(True)
+                val=Gtk.Label(label=v,xalign=0);val.set_line_wrap(True);val.set_max_width_chars(55);val.set_hexpand(True);val.set_selectable(True);val.set_tooltip_text(v)
                 grid.attach(key,0,i,1,1);grid.attach(val,1,i,1,1);labels[index]=val
             if name=='Power':
                 info=Gtk.Label(label=note,xalign=0);info.set_line_wrap(True);info.set_max_width_chars(82)
@@ -272,13 +309,40 @@ def window():
             if name=='Network':
                 info=Gtk.Label(label='Rates are per interface. VPN and physical traffic overlap;\nthey are intentionally not added together.',xalign=0)
                 info.get_style_context().add_class('dim-label');grid.attach(info,0,2,2,1)
-        settings_box=Gtk.Box(orientation=Gtk.Orientation.VERTICAL,spacing=14,margin=18)
-        sc=Gtk.ScrolledWindow();sc.add(settings_box);notebook.append_page(sc,Gtk.Label(label='Settings'))
+        panel_box=Gtk.Box(spacing=18,margin=12)
+        settings_box=Gtk.Box(orientation=Gtk.Orientation.VERTICAL,spacing=10)
+        elements_box=Gtk.Box(orientation=Gtk.Orientation.VERTICAL,spacing=8)
+        panel_box.pack_start(settings_box,True,True,0);panel_box.pack_start(elements_box,True,True,0)
+        sc=Gtk.ScrolledWindow();sc.add(panel_box);notebook.append_page(sc,Gtk.Label(label='Panel'))
         controls={}
-        for key,caption in [('show_cpu','CPU usage in panel'),('show_memory','Memory usage in panel'),('show_temperature','CPU temperature in panel'),('show_network','Network speed in panel'),('show_power','Battery and power in panel'),('show_runtime','Runtime estimate in panel'),('show_swap','Swap usage in panel'),('show_disk','Disk usage in panel'),('tooltip','Detailed panel tooltip'),('compact','Compact panel labels')]:
-            row=Gtk.Box(spacing=16);lab=Gtk.Label(label=caption,xalign=0);row.pack_start(lab,True,True,0)
+        for key,caption in [('tooltip','Full information on hover'),('compact','Compact panel labels')]:
+            row=Gtk.Box(spacing=12);row.pack_start(Gtk.Label(label=caption,xalign=0),True,True,0)
             sw=Gtk.Switch();sw.set_active(cfg[key]);row.pack_end(sw,False,False,0);controls[key]=sw
             settings_box.pack_start(row,False,False,0)
+        row=Gtk.Box(orientation=Gtk.Orientation.VERTICAL,spacing=6);row.pack_start(Gtk.Label(label='Panel font and size',xalign=0),False,False,0)
+        font=Gtk.FontButton();font.set_font(cfg['panel_font']);row.pack_end(font,False,False,0)
+        settings_box.pack_start(row,False,False,0)
+        elements_box.pack_start(Gtk.Label(label='Elements — drag to reorder',xalign=0),False,False,0)
+        metric_names=dict(power='Battery / power',cpu='CPU',memory='Memory',temperature='Temperature',network='Network',runtime='Battery runtime',swap='Swap',disk='Disk')
+        order_store=Gtk.ListStore(str,str,bool)
+        for key in cfg['metric_order'].split(','): order_store.append((key,metric_names[key],cfg['show_'+key]))
+        order_tree=Gtk.TreeView(model=order_store);order_tree.set_reorderable(True)
+        toggle=Gtk.CellRendererToggle()
+        toggle.connect('toggled',lambda _,path: order_store.set_value(order_store.get_iter(path),2,not order_store[path][2]))
+        order_tree.append_column(Gtk.TreeViewColumn('Show',toggle,active=2))
+        order_tree.append_column(Gtk.TreeViewColumn('Element',Gtk.CellRendererText(),text=1))
+        elements_box.pack_start(order_tree,False,False,0)
+        arrows=Gtk.Box(spacing=6)
+        def move_metric(_,offset):
+            model,it=order_tree.get_selection().get_selected()
+            if it is None: return
+            index=model.get_path(it).get_indices()[0];target=index+offset
+            if 0<=target<len(model): model.swap(it,model.get_iter(Gtk.TreePath.new_from_indices([target])))
+        for caption,offset in [('Move up',-1),('Move down',1)]:
+            button=Gtk.Button(label=caption);button.connect('clicked',move_metric,offset);arrows.pack_start(button,False,False,0)
+        elements_box.pack_start(arrows,False,False,0)
+        settings_box=Gtk.Box(orientation=Gtk.Orientation.VERTICAL,spacing=8,margin=12)
+        sc=Gtk.ScrolledWindow();sc.add(settings_box);notebook.append_page(sc,Gtk.Label(label='Settings'))
         row=Gtk.Box(spacing=16);row.pack_start(Gtk.Label(label='Dashboard refresh interval (seconds)',xalign=0),True,True,0)
         spin=Gtk.SpinButton.new_with_range(2,30,1);spin.set_value(cfg['interval']);row.pack_end(spin,False,False,0)
         settings_box.pack_start(row,False,False,0)
@@ -299,7 +363,7 @@ def window():
         choice('memory_units','Panel memory format',['percent','GiB'])
         choice('separator','Panel separator',['  ·  ','  |  ','    '])
         entries={}
-        for key,caption in [('disk_path','Disk mount or directory'),('metric_order','Order: power,cpu,memory,temperature,network,runtime,swap,disk')]:
+        for key,caption in [('disk_path','Disk mount or directory')]:
             row=Gtk.Box(spacing=16);row.pack_start(Gtk.Label(label=caption,xalign=0),True,True,0)
             lab=row.get_children()[0];lab.set_line_wrap(True);lab.set_max_width_chars(40)
             entry=Gtk.Entry();entry.set_text(cfg[key]);row.pack_end(entry,False,False,0)
@@ -311,16 +375,23 @@ def window():
         warning_colour=Gtk.ColorButton();rgba=Gdk.RGBA();rgba.parse(cfg['warning_color']);warning_colour.set_rgba(rgba)
         row=Gtk.Box(spacing=16);row.pack_start(Gtk.Label(label='Warning colour',xalign=0),True,True,0);row.pack_end(warning_colour,False,False,0);settings_box.pack_start(row,False,False,0)
         status=Gtk.Label(xalign=0);status.set_line_wrap(True)
+        dirty=[False]
         timer=[None]
         def update():
             label,data,_=sample()
-            summary.set_markup('<span foreground="'+settings()['accent']+'" weight="bold">'+html.escape(label)+'</span>')
-            for i,lab in labels.items(): lab.set_text(data[i][1])
+            summary.set_markup('<span foreground="'+settings()['accent']+'" weight="bold">'+getattr(sample,'markup',html.escape(label))+'</span>')
+            warnings=getattr(sample,'warnings',{})
+            summary.set_tooltip_text('\n'.join(warnings.values()) or 'No active alerts')
+            for i,lab in labels.items():
+                key={0:'power',10:'temperature',12:'memory'}.get(i)
+                value=html.escape(data[i][1])
+                lab.set_markup(f'<span foreground="{settings()["warning_color"]}">{value}</span>' if key in warnings else value)
+                lab.set_tooltip_text(data[i][1]+('\n'+warnings[key] if key in warnings else ''))
             return True
         def save(button):
-            order=[v.strip() for v in entries['metric_order'].get_text().split(',')]
-            if len(order)!=8 or set(order)!=set(DEFAULTS['metric_order'].split(',')):
-                status.set_text('Order must contain each of the eight metric names exactly once.');return
+            order=[row[0] for row in order_store]
+            cfg.update({'show_'+row[0]:row[2] for row in order_store})
+            cfg['panel_font']=font.get_font()
             cfg.update({k:sw.get_active() for k,sw in controls.items()})
             if not Path(entries['disk_path'].get_text()).is_dir():
                 status.set_text('Choose an existing directory for disk usage.');return
@@ -332,8 +403,9 @@ def window():
             cfg['average_samples']=average.get_value_as_int()
             rgba=colour.get_rgba();cfg['accent']='#%02x%02x%02x'%tuple(round(v*255) for v in [rgba.red,rgba.green,rgba.blue])
             cfg['interval']=spin.get_value_as_int()
-            CONFIG.parent.mkdir(parents=True,exist_ok=True)
-            tmp=CONFIG.with_suffix('.tmp');tmp.write_text(json.dumps(cfg,indent=2));tmp.replace(CONFIG)
+            try: save_settings(cfg)
+            except OSError as exc:
+                status.set_text('Could not save preferences: '+str(exc));return
             if timer[0]: GLib.source_remove(timer[0])
             timer[0]=GLib.timeout_add_seconds(cfg['interval'],update)
             listing=subprocess.run(['xfconf-query','-c','xfce4-panel','-lv'],capture_output=True,text=True)
@@ -342,10 +414,31 @@ def window():
             for prefix in commands:
                 result=subprocess.run(['xfconf-query','-c','xfce4-panel','-p',prefix+'/update-period','-s',str(cfg['panel_interval']*1000)],capture_output=True,text=True)
             status.set_text(f"Preferences saved. Panel refreshes every {cfg['panel_interval']} seconds." if result.returncode==0 else 'Preferences saved; panel interval could not be changed: '+result.stderr)
+            dirty[0]=False;save_button.set_sensitive(False)
             update()
         save_button=Gtk.Button(label='Apply display preferences');save_button.connect('clicked',save)
-        settings_box.pack_start(save_button,False,False,0)
+        outer.pack_start(save_button,False,False,0)
+        save_button.set_sensitive(False)
+        def changed(*_):
+            dirty[0]=True;save_button.set_sensitive(True)
+            status.set_text('Unsaved changes — press Apply to save.')
+        for control in controls.values(): control.connect('notify::active',changed)
+        for control in [spin,average,*extra_spins.values()]: control.connect('value-changed',changed)
+        for control in [*choices.values(),*entries.values()]: control.connect('changed',changed)
+        font.connect('font-set',changed)
+        colour.connect('color-set',changed);warning_colour.connect('color-set',changed)
+        for signal in ('row-changed','rows-reordered','row-inserted','row-deleted'): order_store.connect(signal,changed)
+        def close_requested(*_):
+            if not dirty[0]: return False
+            dialog=Gtk.MessageDialog(transient_for=win,modal=True,message_type=Gtk.MessageType.QUESTION,
+                buttons=Gtk.ButtonsType.NONE,text='Discard unsaved display changes?')
+            dialog.add_button('Keep editing',Gtk.ResponseType.CANCEL)
+            dialog.add_button('Discard',Gtk.ResponseType.REJECT)
+            result=dialog.run();dialog.destroy()
+            return result!=Gtk.ResponseType.REJECT
+        win.connect('delete-event',close_requested)
         settings_box.pack_start(Gtk.Separator(),False,False,0)
+        settings_box.pack_start(Gtk.Label(label='System controls — changes apply immediately',xalign=0),False,False,0)
         # Brightness uses the active session's standard elogind API; no root helper.
         debounce=[None]
         backs=list(Path('/sys/class/backlight').iterdir())

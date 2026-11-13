@@ -1,0 +1,17 @@
+{
+  "xfce4-system-power": {
+    "repository": "https://github.com/bpseditor/xfce4-system-power",
+    "commit": "b5f2e65c26b125917096b7f756e9dd2210ff3edd",
+    "files": {
+      "bin/system-power-widget": "bin/system-power-widget",
+      "config/widget.json": "config/widget.json"
+    }
+  },
+  "xfce4-activity-tracker": {
+    "repository": "https://github.com/bpseditor/xfce4-activity-tracker",
+    "commit": "9c1f8cd1ec78ed2ec305554e4c258d7d788dc24e",
+    "files": {
+      "activity-tracker": "bin/activity-tracker"
+    }
+  }
+}

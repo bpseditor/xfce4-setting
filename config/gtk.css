@@ -3,6 +3,23 @@
 .xfce4-panel button { border: 0; border-radius: 7px; margin: 3px 2px; padding: 2px 6px; background-image: none; box-shadow: none; }
 .xfce4-panel button:hover { background-color: #292f38; }
 .xfce4-panel button:checked { background-color: #384451; color: #d9ad72; }
+/* Tasklist allocates square cells; button and image padding must fit inside them. */
+.xfce4-panel.background .tasklist button,
+.xfce4-panel.background .tasklist button:hover,
+.xfce4-panel.background .tasklist button:active,
+.xfce4-panel.background .tasklist button:checked,
+.xfce4-panel.background .tasklist button:checked:hover {
+ min-width: 0; min-height: 0; margin: 3px 2px; padding: 0;
+ border: 0; border-radius: 7px; background-image: none; box-shadow: none; transition: none;
+}
+.xfce4-panel.background .tasklist button { background-color: transparent; }
+.xfce4-panel.background .tasklist button:hover { background-color: #292f38; }
+.xfce4-panel.background .tasklist button:active,
+.xfce4-panel.background .tasklist button:checked,
+.xfce4-panel.background .tasklist button:checked:hover { background-color: #384451; color: #d9ad72; }
+.xfce4-panel.background .tasklist button image {
+ padding: 0; margin: 0; -gtk-icon-transform: none; -gtk-icon-effect: none; -gtk-icon-shadow: none;
+}
 #genmon-20 { padding: 0 10px; margin: 4px 5px; border-radius: 8px; background-color: #1f242c; }
 #clock-button { color: #c6a77b; padding: 0 10px; }
 tooltip { background-color: #151920; color: #bfbdb6; border: 1px solid #46515e; border-radius: 8px; }
@@ -50,3 +67,10 @@ separator { min-width: 1px; min-height: 1px; background-color: #292f38; }
 calendar { color: #bfbdb6; }
 calendar:indeterminate { color: #7c858f; }
 calendar:selected { color: #151920; background-color: #d9ad72; }
+
+/* Activity Tracker panel readability */
+.xfce4-panel { color: #e0ded8; font-family: Inter; font-size: 13px; }
+#genmon-20, #genmon-21 { padding: 0 10px; margin: 3px 5px; border-radius: 6px; background-color: #1f242c; }
+
+/* Neutral clock, matching Activity Tracker. */
+#clock-button, #clock-button label { color: #bfc5ce; }

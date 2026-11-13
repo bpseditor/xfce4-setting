@@ -68,7 +68,7 @@ def main():
    for name in [font,'OFL.txt']:
     dest=HOME/'.local/share/fonts/desktop'/(family+'-OFL.txt' if name=='OFL.txt' else name)
     data=stage/(family+'-'+name);fetch(f'https://raw.githubusercontent.com/google/fonts/{FONT_COMMIT}/ofl/{family}/'+urllib.parse.quote(name),data);put(data,dest)
- for name in ['system-power-widget','eye-break-reminder']:put(ROOT/'bin'/name,HOME/'.local/bin'/name,True)
+ for name in ['system-power-widget','eye-break-reminder','activity-tracker']:put(ROOT/'bin'/name,HOME/'.local/bin'/name,True)
  put(ROOT/'config/gtk.css',HOME/'.config/gtk-3.0/gtk.css')
  put(ROOT/'config/gtk4.css',HOME/'.config/gtk-4.0/gtk.css')
  # Qt5 and Qt6 use the same palette; qt6ct supports the qt5ct plugin alias.
@@ -110,6 +110,9 @@ def main():
  for name,cmd,category in [('system-power-widget','system-power-widget --window','System;Monitor;'),('eye-break-reminder','eye-break-reminder','Utility;')]:
   dest=HOME/('.config/autostart' if name=='eye-break-reminder' else '.local/share/applications')/(name+'.desktop')
   text(dest,f'[Desktop Entry]\nType=Application\nName={"System & Power" if name=="system-power-widget" else "Eye break reminder"}\nExec="{HOME}/.local/bin/{name}"'+(' --window' if name=='system-power-widget' else '')+f'\nIcon=utilities-system-monitor\nTerminal=false\nOnlyShowIn=XFCE;\nCategories={category}\n')
+ for folder,mode,label in [('.config/autostart','--daemon','Activity Tracker collector'),('.local/share/applications','--window','Activity Tracker')]:
+  dest=HOME/folder/'activity-tracker.desktop'
+  text(dest,f'[Desktop Entry]\nType=Application\nName={label}\nExec="{HOME}/.local/bin/activity-tracker" {mode}\nIcon=preferences-system-time\nTerminal=false\nOnlyShowIn=XFCE;\nCategories=Utility;\n')
  # Derive the GTK2/GTK3/XFWM theme from the pinned upstream assets.
  from theme import recolor_theme
  recolor_theme(HOME/'.local/share/themes/AyuComfort')
@@ -147,5 +150,5 @@ def main():
  if power:run('sudo','python3',str(ROOT/'system/apply-power.py'))
  shutil.copy2(ROOT/'restore.py',backup/'restore.py')
  print(f'Installed. Desktop rollback: python3 "{backup}/restore.py"')
- print('Log out and back in to start the session reminder.')
+ print('Log out and back in to start Activity Tracker and the break reminder.')
 if __name__=='__main__':main()

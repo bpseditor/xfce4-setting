@@ -11,7 +11,7 @@ if RUNTIME.stat().st_uid != os.getuid():
 CACHE = RUNTIME / (f'dashboard-{os.getpid()}.json' if '--window' in sys.argv else 'panel.json')
 
 CONFIG = Path.home()/'.config/system-power-widget/settings.json'
-DEFAULTS = dict(interval=5, panel_interval=5, warning_temperature=80, warning_memory=90, warning_battery=20, warning_color="#df8585", compact=False, metric_order="power,cpu,memory,temperature,network,runtime,swap,disk", show_cpu=True, show_memory=True, show_temperature=True, show_network=False, show_power=True, show_runtime=False, show_swap=False, show_disk=False, interface="auto", network_units="KiB/s", memory_units="percent", disk_path="/", average_samples=24, separator="  ·  ", accent="#d9ad72", tooltip=True)
+DEFAULTS = dict(interval=5, panel_interval=5, warning_temperature=80, warning_memory=90, warning_battery=20, warning_color="#df8585", compact=False, metric_order="power,cpu,memory,temperature,network,runtime,swap,disk", show_cpu=True, show_memory=True, show_temperature=True, show_network=False, show_power=True, show_runtime=False, show_swap=False, show_disk=False, interface="auto", network_units="KiB/s", memory_units="percent", disk_path="/", average_samples=24, separator="  ·  ", accent="#bfbdb6", tooltip=True)
 def settings():
     try: stored=json.loads(CONFIG.read_text())
     except (OSError,ValueError): stored={}
@@ -43,7 +43,51 @@ def duration(hours):
     if hours is None or hours < 0: return '—'
     return f'{int(hours * 60) // 60} h {int(hours * 60) % 60:02d} min'
 
-def sample():
+def panel_field(value, width):
+    """Bound a cell even for an unexpected reading; details stay in the tooltip."""
+    value=str(value)
+    if len(value)>width: value=value[:width-1]+'…'
+    return value.rjust(width)
+
+def panel_network(name, width, unit, rx=None, tx=None):
+    # The interface name and full units remain in the Network tooltip.
+    def rate(value):
+        if value is None: return panel_field('—',5)
+        suffixes={'KiB/s':['K','M','G','T'], 'MiB/s':['M','G','T'],
+                  'Mbit/s':['Mb','Gb','Tb']}.get(unit,['K','M','G','T'])
+        factor=1000 if unit=='Mbit/s' else 1024
+        for suffix in suffixes:
+            digits=1 if value<(9.95 if len(suffix)==2 else 99.95) else 0
+            text=f'{value:.{digits}f}{suffix}'
+            if len(text)<=5: return panel_field(text,5)
+            value/=factor
+        return panel_field('>max',5)
+    return f'↓{rate(rx)}/s ↑{rate(tx)}/s'
+
+def panel_metrics(cfg, *, status, ac, percent, power, busy, used, mt, swap,
+                  swap_total, cpu_temp, disk_percent, eta, network):
+    def number(value, width, digits=0):
+        return panel_field(fmt(value,digits=digits),width)
+    source='AC' if ac or status=='Charging' else 'BAT'
+    flow=('+' if status=='Charging' else '−')+number(power,4,1 if power is None or power<99.95 else 0)+'W' if status in ('Charging','Discharging') else ' '*6
+    # Reserve charging/discharging space even when the battery is idle or absent.
+    values=dict(
+        power=f'{source:<3} BAT {number(percent,3)}% PWR {flow}',
+        cpu=f'CPU {number(busy,3)}%',
+        memory=(f'RAM {number(used/mt*100,3)}%' if cfg['memory_units']=='percent'
+                else f'RAM {number(used,len(f"{mt:.1f}"),1)} GiB'),
+        swap=f'SWAP {number(swap,len(f"{swap_total:.1f}"),1)} GiB',
+        disk=f'DISK {number(disk_percent,3)}%',
+        temperature='TEMP '+number(cpu_temp,3)+'°C',
+        runtime='ETA '+(f'{int(eta):2d}:{int(eta*60)%60:02d}' if eta is not None and 0<=eta<100
+                        else (' >99h' if eta is not None and eta>=100 else '  —  ')),
+        network='NET '+network,
+    )
+    if cfg['compact']:
+        values={k:v.replace('CPU ','C ').replace('RAM ','M ').replace('DISK ','D ').replace('SWAP ','S ').replace('ETA ','') for k,v in values.items()}
+    return values
+
+def sample(panel_mode=False):
     cfg=settings()
     now = time.monotonic()
     try: prev = json.loads(CACHE.read_text())
@@ -60,19 +104,26 @@ def sample():
     used = (mem['MemTotal']-mem['MemAvailable'])/1048576
     mt = mem['MemTotal']/1048576
     swap = (mem['SwapTotal']-mem['SwapFree'])/1048576
-    net, netrows = {}, []
-    for p in sorted(Path('/sys/class/net').iterdir()):
-        if p.name == 'lo': continue
+    net, netrows, panel_net = {}, [], {}
+    interfaces=sorted(p for p in Path('/sys/class/net').iterdir() if p.name!='lo')
+    interface_width=max([len(cfg['interface']) if cfg['interface']!='auto' else 0]+[len(p.name) for p in interfaces]+[1])
+    unit=cfg['network_units']
+    def network_cell(name,rx=None,tx=None):
+        return panel_network(name,interface_width,unit,rx,tx)
+    for p in interfaces:
         rx,tx = num(p/'statistics/rx_bytes'),num(p/'statistics/tx_bytes')
         if rx is None or tx is None: continue
         net[p.name] = [rx,tx]
         if read(p/'operstate') not in ('up','unknown'): continue
         old = prev.get('net',{}).get(p.name)
         speed = ''
+        panel_rx=panel_tx=None
         if valid and old:
             unit=cfg['network_units'];factor={'KiB/s':1024,'MiB/s':1048576,'Mbit/s':125000}.get(unit,1024)
-            speed=f' ↓ {max(0,rx-old[0])/elapsed/factor:.1f} ↑ {max(0,tx-old[1])/elapsed/factor:.1f} {unit}'
+            panel_rx,panel_tx=max(0,rx-old[0])/elapsed/factor,max(0,tx-old[1])/elapsed/factor
+            speed=f' ↓ {panel_rx:.1f} ↑ {panel_tx:.1f} {unit}'
         netrows.append(p.name+speed)
+        panel_net[p.name]=network_cell(p.name,panel_rx,panel_tx)
     status = read(BAT/'status')
     ac = any(read(p/'online') == '1' for p in Path('/sys/class/power_supply').iterdir() if read(p/'type') != 'Battery')
     power,energy,full,design = [num(BAT/f,1e6) for f in ['power_now','energy_now','energy_full','energy_full_design']]
@@ -136,7 +187,7 @@ def sample():
       ('CPU limit',fmt(num('/sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq',1000),' MHz',0)),
       ('GPU',read('/sys/class/drm/card0/device/power_dpm_force_performance_level')),
     ]
-    note='On AC, watts measure battery charging, not wall power.\nRuntime depends on workload. Reported capacity is a controller estimate.\nThe start threshold rises temporarily for a top-up after connecting AC.'
+    note='On AC, watts measure battery charging, not wall power.\nRuntime depends on workload. Reported capacity is a controller estimate.\nCharge thresholds show the current controller settings.'
     data={'t':now,'cpu':total,'idle':idle,'net':net,'power':history,'status':status,'ac':ac}
     tmp=CACHE.with_suffix('.tmp');tmp.write_text(json.dumps(data));tmp.replace(CACHE)
     cfg = settings()
@@ -148,23 +199,32 @@ def sample():
         selected=next((line.split()[0] for line in routes if len(line.split())>1 and line.split()[1]=='00000000'), '')
     network=next((x for x in netrows if x.split()[0]==selected), (netrows[0] if cfg['interface']=='auto' and netrows else selected+' unavailable'))
     metrics['network']=network
+    if panel_mode:
+        network_name=network.split()[0] if netrows or selected else '—'
+        metrics=panel_metrics(cfg,status=status,ac=ac,percent=percent,power=power,busy=busy,
+                              used=used,mt=mt,swap=swap,swap_total=mem['SwapTotal']/1048576,
+                              cpu_temp=cpu_temp,disk_percent=disk.used/disk.total*100,eta=eta,
+                              network=panel_net.get(network_name,network_cell(network_name)))
     order=list(dict.fromkeys(cfg['metric_order'].split(',')+DEFAULTS['metric_order'].split(',')))
     pieces=[metrics[k] for k in order if k in metrics and cfg.get('show_'+k,False)]
-    if cfg['compact']:
+    if cfg['compact'] and not panel_mode:
         pieces=[v.replace('CPU ','C ').replace('RAM ','M ').replace('DISK ','D ').replace('SWAP ','S ') for v in pieces]
     warning=(cpu_temp is not None and cpu_temp>=cfg['warning_temperature']) or used/mt*100>=cfg['warning_memory'] or (status=='Discharging' and percent is not None and percent<=cfg['warning_battery'])
-    if warning: pieces.insert(0,'⚠')
+    if warning and not panel_mode: pieces.insert(0,'⚠')
     sample.warning=warning
     rows[15]=('Network', 'Selected: '+network+'\n\n'+'\n'.join(netrows))
-    return cfg['separator'].join(pieces) or 'System',rows,note
+    separator=(' '+cfg['separator'].strip()+' ' if cfg['separator'].strip() else ' ') if panel_mode else cfg['separator']
+    return separator.join(pieces) or 'System',rows,note
 
 def panel():
-    label,rows,note=sample()
+    label,rows,note=sample(panel_mode=True)
     tip='\n'.join(f'{k}: {v}' for k,v in rows)+'\n\n'+note+'\nClick to open System & Power.'
     cfg=settings()
     color=cfg['warning_color'] if getattr(sample,'warning',False) else cfg['accent']
     if not settings()['tooltip']: tip='Click to open System & Power.'
-    print(f'<txt><span foreground="{color}">{html.escape(label)}</span></txt>'
+    warning_alpha=65535 if getattr(sample,'warning',False) else 1
+    print(f'<txt><span font_family="monospace" font_desc="JetBrains Mono Medium 10" foreground="{color}">'
+          f'<span alpha="{warning_alpha}">⚠</span> {html.escape(label)}</span></txt>'
           f'<txtclick>{html.escape(str(Path.home()/".local/bin/system-power-widget"))} --window</txtclick>'
           f'<tool>{html.escape(tip)}</tool>')
 
@@ -276,7 +336,11 @@ def window():
             tmp=CONFIG.with_suffix('.tmp');tmp.write_text(json.dumps(cfg,indent=2));tmp.replace(CONFIG)
             if timer[0]: GLib.source_remove(timer[0])
             timer[0]=GLib.timeout_add_seconds(cfg['interval'],update)
-            result=subprocess.run(['xfconf-query','-c','xfce4-panel','-p','/plugins/plugin-20/update-period','-s',str(cfg['panel_interval']*1000)],capture_output=True,text=True)
+            listing=subprocess.run(['xfconf-query','-c','xfce4-panel','-lv'],capture_output=True,text=True)
+            commands=[line.split(None,1)[0].rsplit('/',1)[0] for line in listing.stdout.splitlines() if '/command' in line and 'system-power-widget' in line]
+            result=subprocess.CompletedProcess([],1,stderr='No System & Power panel instance found.')
+            for prefix in commands:
+                result=subprocess.run(['xfconf-query','-c','xfce4-panel','-p',prefix+'/update-period','-s',str(cfg['panel_interval']*1000)],capture_output=True,text=True)
             status.set_text(f"Preferences saved. Panel refreshes every {cfg['panel_interval']} seconds." if result.returncode==0 else 'Preferences saved; panel interval could not be changed: '+result.stderr)
             update()
         save_button=Gtk.Button(label='Apply display preferences');save_button.connect('clicked',save)

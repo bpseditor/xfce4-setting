@@ -3,3 +3,8 @@ __pycache__/
 .env
 *.log
 backups/
+
+screenshots/
+*.retired
+*.sqlite*
+*.db

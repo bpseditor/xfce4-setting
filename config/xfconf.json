@@ -26,7 +26,7 @@
     "/general/cycle_draw_frame": false
   },
   "xfce4-panel": {
-    "/panels/panel-1/size": 36,
+    "/panels/panel-1/size": 40,
     "/panels/panel-1/icon-size": 20,
     "/panels/panel-1/background-style": 0,
     "/panels/panel-1/plugin-ids": [
@@ -37,6 +37,8 @@
       2,
       3,
       20,
+      19,
+      21,
       18,
       6,
       16,
@@ -50,7 +52,7 @@
     "/plugins/plugin-4/rows": 1,
     "/plugins/plugin-2/show-labels": false,
     "/plugins/plugin-2/flat-buttons": true,
-    "/plugins/plugin-20/font": "Inter Medium 9",
+    "/plugins/plugin-20/font": "Inter Medium 10",
     "/plugins/plugin-8/digital-format": "%a %d %b  \u00b7  %H:%M",
     "/plugins/plugin-8/digital-time-format": "%a %d %b  \u00b7  %H:%M",
     "/plugins/plugin-8/digital-date-format": "%a %d %b",
@@ -84,7 +86,16 @@
     "/panels/dark-mode": true,
     "/panels/panel-1/length": 100.0,
     "/panels/panel-1/position": "p=6;x=0;y=0",
-    "/panels/panel-1/position-locked": true
+    "/panels/panel-1/position-locked": true,
+    "/plugins/plugin-20/enable-single-row": true,
+    "/plugins/plugin-19": "separator",
+    "/plugins/plugin-19/style": 1,
+    "/plugins/plugin-21": "genmon",
+    "/plugins/plugin-21/command": "@HOME@/.local/bin/activity-tracker",
+    "/plugins/plugin-21/use-label": false,
+    "/plugins/plugin-21/update-period": 1000,
+    "/plugins/plugin-21/font": "Inter Medium 10",
+    "/plugins/plugin-21/enable-single-row": true
   },
   "xfce4-keyboard-shortcuts": {
     "/xfwm4/default/<Alt>Insert": "",
